@@ -1,0 +1,165 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp.*
+.pnp.js
+
+# Build / Output
+dist/
+build/
+out/
+.next/
+.nuxt/
+.cache/
+.parcel-cache/
+public/build/
+.firebase/
+coverage/
+coverage-report/
+
+# Environment / Secrets
+.env
+.env.*.local
+.env.local
+.env.production.local
+.env.test.local
+.env.development.local
+.envrc
+secrets.yml
+
+# Logs and temp files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+tmp/
+temp/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+build/
+dist/
+venv/
+ENV/
+env/
+.venv/
+pip-wheel-metadata/
+.pytest_cache/
+
+# Virtualenv / tooling
+venv/
+.venv/
+env/
+ENV/
+
+# IDEs and editors
+.vscode/
+.idea/
+.history/
+*.sublime-workspace
+*.sublime-project
+
+# Xcode
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcworkspace
+
+# IntelliJ / JetBrains
+*.iml
+out/
+
+# Rust
+target/
+
+# Go
+vendor/
+*.exe
+*.test
+*.out
+
+# Java / Gradle / Maven
+*.class
+*.jar
+*.war
+*.ear
+/.gradle
+/build
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+
+# Docker
+docker-compose.override.yml
+.docker
+
+# Terraform
+.terraform/
+
+# Misc OS files
+Thumbs.db
+ehthumbs.db
+
+# Storybook / static bundlers
+storybook-static/
+
+# SvelteKit
+.svelte-kit/
+
+# Unity
+Library/
+Temp/
+Obj/
+Build/
+Builds/
+Logs/
+UserSettings/
+MemoryCaptures/
+
+# iOS / CocoaPods / SwiftPM
+Pods/
+*.xcworkspace
+*.xcodeproj/project.xcworkspace/
+*.xcuserstate
+.build/
+Package.resolved
+Podfile.lock
+
+# Android / Flutter
+local.properties
+*.iml
+.gradle/
+/.idea/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+android/.gradle/
+
+# PHP / Composer
+vendor/
+composer.lock
+
+# AWS / Serverless
+.aws-sam/
+serverless.yml
+
+# Secrets and keys
+*.pem
+*.key
+*.crt
+
