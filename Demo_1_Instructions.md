@@ -575,39 +575,7 @@ No one should do “cleanup refactors” before Friday.
 
 ---
 
-## 6. First actions tonight
-
-Do these in this exact order before real coding starts.
-
-### Step 1
-Shared-contracts owner creates and freezes:
-- `domain.ts`
-- `socket.ts`
-- `socketEvents.ts`
-
-### Step 2
-Everyone pulls latest `main` after those files merge.
-
-### Step 3
-Each owner creates their feature branch.
-
-### Step 4
-Session owner + turn-engine owner + persistence owner agree on the exact server call flow:
-- create room
-- join room
-- start game
-- roll dice
-- end turn
-
-### Step 5
-Client networking owner waits until the server payload shapes are merged, then wires the socket layer.
-
-### Step 6
-Lobby / board owners build UI against the frozen client state shape only.
-
----
-
-## 7. 7-person ownership split
+## 6. 7-person ownership split
 
 Assign one real teammate to each role below.
 
@@ -817,7 +785,7 @@ This owner is the glue between server and screens. Keep it centralized.
 
 ---
 
-## 8. Exact dev sequence for the whole team
+## 7. Exact dev sequence for the whole team
 
 ## Phase A — Freeze DONE
 1. Person 1 implements the shared contracts.
@@ -853,7 +821,7 @@ This owner is the glue between server and screens. Keep it centralized.
 
 ---
 
-## 9. Friday demo acceptance checklist
+## 8. Friday demo acceptance checklist
 
 The build is demo-ready only if all of these are true:
 
