@@ -40,7 +40,7 @@ export class EntryScreen {
 
     // Title
     const title = document.createElement('h1');
-    title.className = 'text-5xl font-bold text-white drop-shadow-lg';
+    title.className = 'font-hexahaven-title text-5xl font-bold text-white drop-shadow-lg';
     title.textContent = 'HexaHaven';
 
     // Loading indicator
