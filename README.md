@@ -82,6 +82,8 @@ preload ()
 
 When you issue the `npm run build` command, all static assets are automatically copied to the `dist/assets` folder.
 
+For the main menu background video, place an MP4 file at `public/videos/welcome-bg.mp4`.
+
 ## Deploying to Production
 
 After you run the `npm run build` command, your code will be built into a single bundle and saved to the `dist` folder, along with any other assets your project imported, or stored in the public assets folder.

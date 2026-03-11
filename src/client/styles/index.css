@@ -1,5 +1,21 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "04B_30__";
+  src: url("/fonts/04B_30__.TTF") format("truetype");
+  font-display: swap;
+}
+
+.font-hexahaven-title {
+  font-family: "04B_30__", monospace;
+  letter-spacing: 0.08em;
+}
+
+.font-hexahaven-ui {
+  font-family: "04B_30__", monospace;
+  letter-spacing: 0.04em;
+}
+
 body {
   margin: 0;
   padding: 0;

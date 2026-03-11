@@ -12,16 +12,36 @@ export class MainMenuScreen {
 
     // Create main container
     this.container = document.createElement('div');
-    this.container.className = 'flex flex-col items-center justify-center w-full h-full bg-gradient-to-b from-slate-900 to-slate-950';
+    this.container.className = 'relative flex flex-col items-center justify-center w-full h-full overflow-hidden bg-gradient-to-b from-slate-900 to-slate-950';
+
+    // Background video (served from public/videos/welcome-bg.mp4)
+    const backgroundVideo = document.createElement('video');
+    backgroundVideo.className = 'absolute inset-0 w-full h-full object-cover';
+    backgroundVideo.autoplay = true;
+    backgroundVideo.loop = true;
+    backgroundVideo.muted = true;
+    backgroundVideo.playsInline = true;
+    backgroundVideo.setAttribute('aria-hidden', 'true');
+
+    const videoSource = document.createElement('source');
+    videoSource.src = '/videos/welcome-bg.mp4';
+    videoSource.type = 'video/mp4';
+    backgroundVideo.appendChild(videoSource);
+
+    const overlay = document.createElement('div');
+    overlay.className = 'absolute inset-0 bg-slate-950/50';
+
+    const content = document.createElement('div');
+    content.className = 'relative z-10 flex flex-col items-center justify-center w-full h-full';
 
     // Title
     const title = document.createElement('h1');
-    title.className = 'text-6xl font-bold text-white mb-4 drop-shadow-lg';
+    title.className = 'font-hexahaven-title text-6xl font-bold text-white mb-4 drop-shadow-lg';
     title.textContent = 'HexaHaven';
 
     // Subtitle
     const subtitle = document.createElement('p');
-    subtitle.className = 'text-xl text-slate-300 mb-12 drop-shadow-md';
+    subtitle.className = 'font-hexahaven-ui text-xl text-slate-300 mb-12 drop-shadow-md';
     subtitle.textContent = 'Master the Hexagon Strategy Game';
 
     // Button container
@@ -48,16 +68,20 @@ export class MainMenuScreen {
     const testMapBtn = this.createButton('Test Map Gen', () => this.onTestMapGen(), 'secondary');
     buttonContainer.appendChild(testMapBtn);
 
-    this.container.appendChild(title);
-    this.container.appendChild(subtitle);
-    this.container.appendChild(buttonContainer);
+    content.appendChild(title);
+    content.appendChild(subtitle);
+    content.appendChild(buttonContainer);
+
+    this.container.appendChild(backgroundVideo);
+    this.container.appendChild(overlay);
+    this.container.appendChild(content);
 
     parentElement.appendChild(this.container);
   }
 
   private createButton(text: string, onClick: () => void, variant: 'primary' | 'secondary' = 'primary'): HTMLButtonElement {
     const button = document.createElement('button');
-    const baseClasses = 'px-8 py-3 font-semibold rounded-lg transition-all duration-200 cursor-pointer hover:shadow-lg';
+    const baseClasses = 'font-hexahaven-ui px-8 py-3 font-semibold rounded-lg transition-all duration-200 cursor-pointer hover:shadow-lg';
     const variantClasses = variant === 'primary'
       ? 'bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800'
       : 'bg-slate-700 text-white hover:bg-slate-600 active:bg-slate-800';
