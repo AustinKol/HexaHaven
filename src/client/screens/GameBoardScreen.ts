@@ -54,7 +54,7 @@ export class GameBoardScreen {
     this.musicToggleButton = document.createElement('button');
     this.musicToggleButton.className = 'font-hexahaven-ui';
     this.musicToggleButton.style.position = 'absolute';
-    this.musicToggleButton.style.top = '16px';
+    this.musicToggleButton.style.top = '62px';
     this.musicToggleButton.style.left = '16px';
     this.musicToggleButton.style.zIndex = '3';
     this.musicToggleButton.style.padding = '8px 10px';
