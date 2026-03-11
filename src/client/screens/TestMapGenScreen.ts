@@ -362,9 +362,9 @@ export class MapGenTest extends Scene {
     }
 
     private renderMap() {
-        this.children.each((child: any) => {
-            if (child.type === 'Graphics' || child.type === 'Image' ||
-                (child.type === 'Text' && child.scrollFactorX !== 0)) {
+        // Destroy from a snapshot so we do not skip nodes while mutating children.
+        this.children.list.slice().forEach((child: Phaser.GameObjects.GameObject) => {
+            if (child.type === 'Graphics' || child.type === 'Image' || child.type === 'Text') {
                 child.destroy();
             }
         });
