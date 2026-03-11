@@ -56,7 +56,7 @@ export class EntryScreen {
 
     // Subtitle
     const subtitle = document.createElement('p');
-    subtitle.className = 'text-sm text-slate-400 mt-8';
+    subtitle.className = 'font-hexahaven-ui text-sm text-slate-400 mt-8';
     subtitle.textContent = 'Loading...';
 
     content.appendChild(logoContainer);
