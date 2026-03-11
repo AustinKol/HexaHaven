@@ -817,51 +817,9 @@ This owner is the glue between server and screens. Keep it centralized.
 
 ---
 
-## 8. Exact minimum files each owner must finish
+## 8. Exact dev sequence for the whole team
 
-## Person 1 must finish
-- `src/shared/constants/socketEvents.ts`
-- `src/shared/types/domain.ts`
-- `src/shared/types/socket.ts`
-
-## Person 2 must finish
-- `src/server/config/firebaseAdmin.ts`
-- `src/server/persistence/gameSessionsRepository.ts`
-- `src/server/persistence/playersRepository.ts`
-- `src/server/persistence/boardRepository.ts`
-- `src/server/persistence/turnsRepository.ts`
-
-## Person 3 must finish
-- `src/server/realtime/registerSocketHandlers.ts`
-- `src/server/sessions/RoomManager.ts`
-- `src/server/sessions/Room.ts`
-
-## Person 4 must finish
-- `src/server/engine/GameEngine.ts`
-- `src/server/engine/TurnManager.ts`
-
-## Person 5 must finish
-- `src/client/screens/HostGameScreen.ts`
-- `src/client/screens/JoinGameScreen.ts`
-- `src/client/screens/WaitingRoomScreen.ts`
-
-## Person 6 must finish
-- `src/client/screens/GameBoardScreen.ts`
-- `src/client/rendering/RendererRoot.ts`
-
-## Person 7 must finish
-- `src/client/networking/socketClient.ts`
-- `src/client/networking/registerClientEvents.ts`
-- `src/client/state/clientState.ts`
-- `src/client/app/App.ts`
-
-Everything else is secondary for Friday.
-
----
-
-## 9. Exact dev sequence for the whole team
-
-## Phase A — Freeze
+## Phase A — Freeze DONE
 1. Person 1 implements the shared contracts.
 2. Team reviews the contracts once.
 3. Freeze them.
@@ -895,7 +853,7 @@ Everything else is secondary for Friday.
 
 ---
 
-## 10. Friday demo acceptance checklist
+## 9. Friday demo acceptance checklist
 
 The build is demo-ready only if all of these are true:
 
@@ -918,29 +876,3 @@ The build is demo-ready only if all of these are true:
 If any of these fail, do not spend time on extra features.
 
 ---
-
-## 11. Do not do these before Friday
-
-- no build system rewrites
-- no extra socket events
-- no advanced Firestore schema refactors
-- no attempt to fully finish all game rules
-- no spectator implementation
-- no result-screen logic unless core flow is already stable
-- no time spent on save/load or JSON
-- no major CSS polish passes
-- no replacing the frozen shared contracts mid-stream
-
----
-
-## 12. Final advice
-
-The fastest way to hit Friday is:
-- freeze contracts once
-- keep the socket surface tiny
-- finish backend before UI polish
-- keep one owner per subsystem
-- test with two browser windows constantly
-- stop at the first believable playable slice
-
-If the team follows this document strictly, the project should be in a valid **“1/3 playable”** state by Friday.
