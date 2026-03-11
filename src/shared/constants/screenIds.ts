@@ -8,6 +8,7 @@ export const ScreenId = {
   GameBoard: 'game-board',
   Result: 'result',
   Settings: 'settings',
+  TestMapGen: 'test-map-gen',
 } as const;
 
 export type ScreenId = (typeof ScreenId)[keyof typeof ScreenId];
