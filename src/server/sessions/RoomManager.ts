@@ -29,9 +29,6 @@ export class RoomManager {
       name: playerName.trim(),
     };
     room.players.push(player);
-    if (room.players.length >= 2) {
-      room.status = 'ready';
-    }
     return { room, player };
   }
 

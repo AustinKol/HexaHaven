@@ -1,1 +1,1 @@
-export type { Player } from '../types/domain';
+export type { PlayerState, PlayerStats, PresenceInfo, Goal } from '../types/domain';

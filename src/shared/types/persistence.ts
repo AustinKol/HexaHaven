@@ -1,3 +1,7 @@
+// DEPRECATED: These interfaces predate the frozen GameState shape.
+// Person 2 (Firestore owner) should redefine Firestore document types
+// based on the new types in domain.ts. Do not build new code against these.
+
 export interface PersistedGameSession {
   id: string;
   hostId: string;

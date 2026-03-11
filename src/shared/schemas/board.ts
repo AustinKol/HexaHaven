@@ -1,1 +1,1 @@
-export type { PersistedBoard } from '../types/persistence';
+export type { BoardState, TileState, StructureState, HexCoord } from '../types/domain';

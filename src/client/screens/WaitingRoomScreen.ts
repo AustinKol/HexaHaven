@@ -86,7 +86,7 @@ export class WaitingRoomScreen {
           throw new Error(response.error ?? 'Room no longer available.');
         }
         renderPlayers(response.data.room);
-        if (response.data.room.status === 'ready' && response.data.room.players.length >= 2) {
+        if (response.data.room.players.length >= 2) {
           this.navigate?.(ScreenId.GameBoard);
           return;
         }

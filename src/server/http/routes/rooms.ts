@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { ApiRoutes } from '../../../shared/constants/apiRoutes';
 import type { ApiResponse, RoomSnapshot } from '../../../shared/types/api';
+import type { RoomStatus } from '../../../shared/types/domain';
 import { roomManager } from '../../sessions/roomManagerSingleton';
 
 interface HostRoomBody {
@@ -12,7 +13,7 @@ interface JoinRoomBody {
   roomId?: string;
 }
 
-function buildRoomSnapshot(room: { id: string; players: Array<{ id: string; name: string }>; status: 'waiting' | 'ready' }): RoomSnapshot {
+function buildRoomSnapshot(room: { id: string; players: Array<{ id: string; name: string }>; status: RoomStatus }): RoomSnapshot {
   return {
     roomId: room.id,
     status: room.status,

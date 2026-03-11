@@ -1,13 +1,172 @@
-export interface Player {
-  id: string;
-  name: string;
+// FROZEN -- see Demo_1_Instructions.md Section 3
+// Do not modify without whole-team agreement.
+
+// ─── 3.1 Frozen enums ───────────────────────────────────────────────
+
+export type RoomStatus = 'waiting' | 'in_progress' | 'finished';
+
+export type GamePhase = 'ROLL' | 'COLLECT' | 'ACTION' | 'END';
+
+export type ClientRole = 'PLAYER' | 'SPECTATOR';
+
+export type ResourceType = 'CRYSTAL' | 'STONE' | 'BLOOM' | 'EMBER' | 'GOLD';
+
+export type StructureType = 'ROAD' | 'SETTLEMENT' | 'GARDEN';
+
+export type LocationType = 'EDGE' | 'VERTEX';
+
+export type TurnRecordStatus = 'in_progress' | 'completed';
+
+// ─── 3.2 Frozen GameState shape ─────────────────────────────────────
+
+export interface ResourceBundle {
+  CRYSTAL: number;
+  STONE: number;
+  BLOOM: number;
+  EMBER: number;
+  GOLD: number;
 }
 
-export interface GameSession {
-  id: string;
-  hostId: string;
-  players: Player[];
-  status: GameStatus;
+export interface DiceRoll {
+  d1Val: number;
+  d2Val: number;
+  sum: number;
+  rolledAt: string; // ISO string in app layer
 }
 
-export type GameStatus = 'waiting' | 'in-progress' | 'finished';
+export interface GameConfig {
+  playerCount: number;
+  goalCount: number;
+  winRule: 'ALL_GOALS_COMPLETE' | 'ANY_X_GOALS_COMPLETE' | 'FIRST_TO_X_POINTS';
+  mapSeed: number;
+  mapSize: 'small' | 'medium' | 'large';
+  timerEnabled: boolean;
+  turnTimeSec: number | null;
+  allowReroll: boolean;
+  startingResources: ResourceBundle;
+}
+
+export interface PresenceInfo {
+  isConnected: boolean;
+  lastSeenAt: string;
+  connectionId: string;
+}
+
+export interface PlayerStats {
+  publicVP: number;
+  settlementsBuilt: number;
+  roadsBuilt: number;
+  totalResourcesCollected: number;
+  totalResourcesSpent: number;
+  longestRoadLength: number;
+  turnsPlayed: number;
+}
+
+export interface Goal {
+  goalId: string;
+  type: 'UPGRADE_SETTLEMENT' | 'ROAD_PATH' | 'COLLECT_RESOURCE';
+  params: Record<string, unknown>;
+  completed: boolean;
+  completedAtTurn: number;
+  description: string;
+  progress: number;
+  targetValue: number;
+}
+
+export interface PlayerState {
+  playerId: string;
+  userId: string;
+  displayName: string;
+  color: string;
+  isHost: boolean;
+  resources: ResourceBundle;
+  goals: Goal[];
+  stats: PlayerStats;
+  presence: PresenceInfo;
+  joinedAt: string;
+  updatedAt: string;
+}
+
+export interface HexCoord {
+  q: number;
+  r: number;
+}
+
+export interface VertexLocation {
+  id: string;
+  hex: HexCoord;
+  corner: number;
+  adjacentHexes: HexCoord[];
+}
+
+export interface EdgeLocation {
+  id: string;
+  hex: HexCoord;
+  dir: number;
+  adjacentHexes: HexCoord[];
+}
+
+export interface RoadPath {
+  connectedRoads: string[];
+  pathLength: number;
+}
+
+export interface TileState {
+  tileId: string;
+  coord: HexCoord;
+  resourceType: ResourceType | 'DESERT';
+  numberToken: number | null;
+  adjacentTiles: string[];
+  vertices: string[];
+  edges: string[];
+  createdAt: string;
+}
+
+export interface StructureState {
+  structureId: string;
+  ownerPlayerId: string;
+  ownerName: string;
+  ownerColor: string;
+  type: StructureType;
+  level: number;
+  locationType: LocationType;
+  vertex: VertexLocation | null;
+  edge: EdgeLocation | null;
+  adjacentStructures: string[];
+  adjacentTiles: string[];
+  builtAtTurn: number;
+  builtAt: string;
+  cost: ResourceBundle;
+  roadPath: RoadPath | null;
+}
+
+export interface BoardState {
+  tilesById: Record<string, TileState>;
+  structuresById: Record<string, StructureState>;
+}
+
+export interface TurnState {
+  currentTurn: number;
+  currentPlayerId: string | null;
+  currentPlayerIndex: number | null;
+  phase: GamePhase | null;
+  turnStartedAt: string | null;
+  turnEndsAt: string | null;
+  lastDiceRoll: DiceRoll | null;
+}
+
+export interface GameState {
+  gameId: string;
+  roomCode: string;
+  roomStatus: RoomStatus;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  isDeleted: boolean;
+  winnerPlayerId: string | null;
+  config: GameConfig;
+  playerOrder: string[];
+  playersById: Record<string, PlayerState>;
+  board: BoardState;
+  turn: TurnState;
+}

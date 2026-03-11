@@ -1,9 +1,11 @@
+import type { RoomStatus } from '../../shared/types/domain';
+
 export interface RoomPlayer {
   id: string;
   name: string;
 }
 
-export type RoomStatus = 'waiting' | 'ready';
+export { RoomStatus };
 
 export interface Room {
   id: string;
