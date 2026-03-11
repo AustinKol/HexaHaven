@@ -21,7 +21,7 @@ export class RoomManager {
 
   joinRoom(roomId: string, playerName: string): { room: Room; player: RoomPlayer } | null {
     const room = this.rooms.get(roomId);
-    if (!room || room.players.length >= 2) {
+    if (!room || room.status !== 'waiting' || room.players.length >= 2) {
       return null;
     }
     const player: RoomPlayer = {
@@ -30,6 +30,18 @@ export class RoomManager {
     };
     room.players.push(player);
     return { room, player };
+  }
+
+  startRoom(roomId: string, hostId: string): Room | null {
+    const room = this.rooms.get(roomId);
+    if (!room) {
+      return null;
+    }
+    if (room.hostId !== hostId || room.status !== 'waiting' || room.players.length < 2) {
+      return null;
+    }
+    room.status = 'in_progress';
+    return room;
   }
 
   getRoom(roomId: string): Room | null {

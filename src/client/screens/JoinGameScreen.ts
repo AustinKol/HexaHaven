@@ -77,7 +77,7 @@ export class JoinGameScreen {
           playerName: name,
           role: 'guest',
         });
-        this.navigate?.(ScreenId.GameBoard);
+        this.navigate?.(ScreenId.WaitingRoom);
       } catch (error) {
         errorText.textContent = error instanceof Error ? error.message : 'Unable to join room.';
       } finally {

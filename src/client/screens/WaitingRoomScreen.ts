@@ -9,6 +9,7 @@ export class WaitingRoomScreen {
   private container: HTMLElement | null = null;
   private navigate: ((screenId: ScreenId) => void) | null = null;
   private pollTimer: number | null = null;
+  private isStarting = false;
 
   render(parentElement: HTMLElement, _onComplete?: () => void, navigate?: (screenId: ScreenId) => void): void {
     this.navigate = navigate ?? null;
@@ -47,10 +48,17 @@ export class WaitingRoomScreen {
 
     const statusText = document.createElement('p');
     statusText.className = 'font-hexahaven-ui text-slate-200 mb-3';
-    statusText.textContent = 'Waiting for another player to join...';
+    statusText.textContent = 'Loading room...';
 
     const playerList = document.createElement('div');
     playerList.className = 'flex flex-col gap-2 text-left mb-4';
+
+    const startButton = document.createElement('button');
+    startButton.className =
+      'w-full mb-2 font-hexahaven-ui px-4 py-3 bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed';
+    startButton.textContent = 'Start Game';
+    startButton.disabled = true;
+    startButton.style.display = session.role === 'host' ? 'block' : 'none';
 
     const leaveButton = document.createElement('button');
     leaveButton.className = 'w-full font-hexahaven-ui px-4 py-3 bg-slate-700 rounded-lg hover:bg-slate-600 transition-colors';
@@ -65,6 +73,7 @@ export class WaitingRoomScreen {
     card.appendChild(keyValue);
     card.appendChild(statusText);
     card.appendChild(playerList);
+    card.appendChild(startButton);
     card.appendChild(leaveButton);
     this.container.appendChild(card);
     parentElement.appendChild(this.container);
@@ -74,10 +83,65 @@ export class WaitingRoomScreen {
       room.players.forEach((player, index) => {
         const row = document.createElement('div');
         row.className = 'font-hexahaven-ui px-3 py-2 rounded-md bg-slate-800 border border-slate-700';
-        row.textContent = `${index + 1}. ${player.name}`;
+        const isHost = player.id === room.players[0]?.id;
+        row.textContent = `${index + 1}. ${player.name}${isHost ? ' (Host)' : ''}`;
         playerList.appendChild(row);
       });
     };
+
+    const updateStatusText = (room: RoomSnapshot) => {
+      if (room.status === 'in_progress') {
+        statusText.textContent = 'Game is starting...';
+        return;
+      }
+      if (session.role === 'host') {
+        statusText.textContent =
+          room.players.length < 2
+            ? 'Waiting for another player to join...'
+            : 'A player joined. Click "Start Game" when ready.';
+        return;
+      }
+      statusText.textContent =
+        room.players.length < 2 ? 'Waiting for host...' : 'Waiting for host to start the game...';
+    };
+
+    const updateStartButtonState = (room: RoomSnapshot) => {
+      if (session.role !== 'host') {
+        return;
+      }
+      if (this.isStarting) {
+        startButton.disabled = true;
+        startButton.textContent = 'Starting...';
+        return;
+      }
+      const canStart = room.status === 'waiting' && room.players.length >= 2;
+      startButton.disabled = !canStart;
+      startButton.textContent = 'Start Game';
+    };
+
+    startButton.addEventListener('click', async () => {
+      if (session.role !== 'host' || this.isStarting) {
+        return;
+      }
+      this.isStarting = true;
+      startButton.disabled = true;
+      startButton.textContent = 'Starting...';
+      try {
+        const response = await apiFetch<ApiResponse<{ room: RoomSnapshot }>>(ApiRoutes.StartRoom, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ roomId: session.roomId, playerId: session.playerId }),
+        });
+        if (!response.success) {
+          throw new Error(response.error ?? 'Unable to start game.');
+        }
+        statusText.textContent = 'Game is starting...';
+      } catch (error) {
+        statusText.textContent = error instanceof Error ? error.message : 'Unable to start game.';
+      } finally {
+        this.isStarting = false;
+      }
+    });
 
     const poll = async () => {
       try {
@@ -85,8 +149,11 @@ export class WaitingRoomScreen {
         if (!response.success || !response.data) {
           throw new Error(response.error ?? 'Room no longer available.');
         }
-        renderPlayers(response.data.room);
-        if (response.data.room.players.length >= 2) {
+        const room = response.data.room;
+        renderPlayers(room);
+        updateStatusText(room);
+        updateStartButtonState(room);
+        if (room.status === 'in_progress') {
           this.navigate?.(ScreenId.GameBoard);
           return;
         }

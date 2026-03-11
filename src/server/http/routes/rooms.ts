@@ -13,6 +13,11 @@ interface JoinRoomBody {
   roomId?: string;
 }
 
+interface StartRoomBody {
+  roomId?: string;
+  playerId?: string;
+}
+
 function buildRoomSnapshot(room: { id: string; players: Array<{ id: string; name: string }>; status: RoomStatus }): RoomSnapshot {
   return {
     roomId: room.id,
@@ -65,6 +70,32 @@ roomsRouter.post(ApiRoutes.JoinRoom, (req, res) => {
     data: {
       room: buildRoomSnapshot(joined.room),
       playerId: joined.player.id,
+    },
+  };
+  res.json(response);
+});
+
+roomsRouter.post(ApiRoutes.StartRoom, (req, res) => {
+  const { roomId, playerId } = (req.body ?? {}) as StartRoomBody;
+  const normalizedRoomId = roomId?.trim().toUpperCase() ?? '';
+  const normalizedPlayerId = playerId?.trim() ?? '';
+  if (!normalizedRoomId || !normalizedPlayerId) {
+    const response: ApiResponse = { success: false, error: 'Room key and player id are required.' };
+    res.status(400).json(response);
+    return;
+  }
+
+  const room = roomManager.startRoom(normalizedRoomId, normalizedPlayerId);
+  if (!room) {
+    const response: ApiResponse = { success: false, error: 'Unable to start game.' };
+    res.status(403).json(response);
+    return;
+  }
+
+  const response: ApiResponse<{ room: RoomSnapshot }> = {
+    success: true,
+    data: {
+      room: buildRoomSnapshot(room),
     },
   };
   res.json(response);
