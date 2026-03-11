@@ -567,11 +567,18 @@ export class TestMapGenScreen {
     private container: HTMLElement | null = null;
     private regenerateButton: HTMLButtonElement | null = null;
     private exitButton: HTMLButtonElement | null = null;
+    private musicToggleButton: HTMLButtonElement | null = null;
     private game: Phaser.Game | null = null;
     private readonly showExitButton: boolean;
+    private readonly enableBackgroundMusic: boolean;
+    private readonly backgroundMusic = new Audio('/audio/game-board-theme.mp3');
+    private isMusicMuted = false;
 
-    constructor(options?: { showExitButton?: boolean }) {
+    constructor(options?: { showExitButton?: boolean; enableBackgroundMusic?: boolean }) {
         this.showExitButton = options?.showExitButton ?? true;
+        this.enableBackgroundMusic = options?.enableBackgroundMusic ?? true;
+        this.backgroundMusic.loop = true;
+        this.backgroundMusic.volume = 0.35;
     }
 
     private ensureButtonFontRegistered(): void {
@@ -589,6 +596,9 @@ export class TestMapGenScreen {
     }
 
     render(parentElement: HTMLElement, _onComplete?: () => void, navigate?: (screenId: string) => void): void {
+        if (this.enableBackgroundMusic) {
+            this.playBackgroundMusic();
+        }
         // Clear existing content
         this.ensureButtonFontRegistered();
         parentElement.innerHTML = '';
@@ -632,6 +642,26 @@ export class TestMapGenScreen {
         };
         this.container.appendChild(this.regenerateButton);
 
+        if (this.enableBackgroundMusic) {
+            this.musicToggleButton = document.createElement('button');
+            this.musicToggleButton.style.position = 'absolute';
+            this.musicToggleButton.style.top = '62px';
+            this.musicToggleButton.style.left = '16px';
+            this.musicToggleButton.style.zIndex = '3';
+            this.musicToggleButton.style.padding = '8px 10px';
+            this.musicToggleButton.style.fontSize = '14px';
+            this.musicToggleButton.style.fontWeight = '600';
+            this.musicToggleButton.style.fontFamily = `'${TEST_MAP_BUTTON_FONT_FAMILY}', monospace`;
+            this.musicToggleButton.style.color = '#ffffff';
+            this.musicToggleButton.style.background = 'rgba(15, 23, 42, 0.85)';
+            this.musicToggleButton.style.border = '1px solid rgba(255, 255, 255, 0.35)';
+            this.musicToggleButton.style.borderRadius = '8px';
+            this.musicToggleButton.style.cursor = 'pointer';
+            this.musicToggleButton.onclick = () => this.toggleMusic();
+            this.updateMusicButtonText();
+            this.container.appendChild(this.musicToggleButton);
+        }
+
         if (this.showExitButton) {
             this.exitButton = document.createElement('button');
             this.exitButton.textContent = 'Exit to Menu';
@@ -672,7 +702,33 @@ export class TestMapGenScreen {
         this.game = new Phaser.Game(config);
     }
 
+    private playBackgroundMusic(): void {
+        this.backgroundMusic.currentTime = 0;
+        this.backgroundMusic
+            .play()
+            .catch(() => {
+                // Browser autoplay policies may block playback before user interaction.
+            });
+    }
+
+    private stopBackgroundMusic(): void {
+        this.backgroundMusic.pause();
+        this.backgroundMusic.currentTime = 0;
+    }
+
+    private toggleMusic(): void {
+        this.isMusicMuted = !this.isMusicMuted;
+        this.backgroundMusic.muted = this.isMusicMuted;
+        this.updateMusicButtonText();
+    }
+
+    private updateMusicButtonText(): void {
+        if (!this.musicToggleButton) return;
+        this.musicToggleButton.textContent = this.isMusicMuted ? 'Music: Off' : 'Music: On';
+    }
+
     destroy(): void {
+        this.stopBackgroundMusic();
         if (this.game) {
             this.game.destroy(true);
             this.game = null;
@@ -688,6 +744,10 @@ export class TestMapGenScreen {
         if (this.exitButton) {
             this.exitButton.remove();
             this.exitButton = null;
+        }
+        if (this.musicToggleButton) {
+            this.musicToggleButton.remove();
+            this.musicToggleButton = null;
         }
     }
 }
