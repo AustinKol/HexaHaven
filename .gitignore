@@ -162,4 +162,5 @@ serverless.yml
 *.pem
 *.key
 *.crt
+*firebase-adminsdk*.json
 

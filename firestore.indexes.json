@@ -1,4 +1,34 @@
 {
-  "indexes": [],
+  "indexes": [
+    {
+      "collectionGroup": "games",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "roomCode",  "order": "ASCENDING" },
+        { "fieldPath": "isDeleted", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "turns",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "turnNumber", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "structures",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ownerPlayerId", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "activeGames",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "lastAccessedAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
   "fieldOverrides": []
 }
