@@ -4,6 +4,7 @@ import { GameBoardScreen } from '../screens/GameBoardScreen';
 import { HostGameScreen } from '../screens/HostGameScreen';
 import { JoinGameScreen } from '../screens/JoinGameScreen';
 import { MainMenuScreen } from '../screens/MainMenuScreen';
+import { SettingsScreen } from '../screens/SettingsScreen';
 import { TestMapGenScreen } from '../screens/TestMapGenScreen';
 import { WaitingRoomScreen } from '../screens/WaitingRoomScreen';
 import { WatchGameScreen } from '../screens/WatchGameScreen';
@@ -24,6 +25,7 @@ export class App {
     registerScreen('watch-game', new WatchGameScreen());
     registerScreen('waiting-room', new WaitingRoomScreen());
     registerScreen('game-board', new GameBoardScreen());
+    registerScreen('settings', new SettingsScreen());
     registerScreen('test-map-gen', new TestMapGenScreen());
   }
 
