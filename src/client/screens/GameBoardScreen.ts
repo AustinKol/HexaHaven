@@ -1,10 +1,10 @@
 import { ScreenId } from '../../shared/constants/screenIds';
-import { clearLobbySession } from '../state/lobbyState';
+import { clearLobbySession, getLobbySession } from '../state/lobbyState';
 import { TestMapGenScreen } from './TestMapGenScreen';
 
 export class GameBoardScreen {
   readonly id = ScreenId.GameBoard;
-  private readonly mapScreen = new TestMapGenScreen({ showExitButton: false, enableBackgroundMusic: false });
+  private mapScreen: TestMapGenScreen | null = null;
   private readonly backgroundMusic = new Audio('/audio/game-board-theme.mp3');
   private exitButton: HTMLButtonElement | null = null;
   private musicToggleButton: HTMLButtonElement | null = null;
@@ -18,6 +18,14 @@ export class GameBoardScreen {
 
   render(parentElement: HTMLElement, onComplete?: () => void, navigate?: (screenId: ScreenId) => void): void {
     this.playBackgroundMusic();
+    const session = getLobbySession();
+    this.mapScreen = new TestMapGenScreen({
+      showExitButton: false,
+      enableBackgroundMusic: false,
+      showRegenerateButton: false,
+      allowPointerRegenerate: false,
+      mapSeed: session?.roomId,
+    });
     this.mapScreen.render(
       parentElement,
       onComplete,
@@ -54,7 +62,7 @@ export class GameBoardScreen {
     this.musicToggleButton = document.createElement('button');
     this.musicToggleButton.className = 'font-hexahaven-ui';
     this.musicToggleButton.style.position = 'absolute';
-    this.musicToggleButton.style.top = '62px';
+    this.musicToggleButton.style.top = '16px';
     this.musicToggleButton.style.left = '16px';
     this.musicToggleButton.style.zIndex = '3';
     this.musicToggleButton.style.padding = '8px 10px';
@@ -106,6 +114,7 @@ export class GameBoardScreen {
       this.musicToggleButton = null;
     }
     this.buttonContainer = null;
-    this.mapScreen.destroy();
+    this.mapScreen?.destroy();
+    this.mapScreen = null;
   }
 }

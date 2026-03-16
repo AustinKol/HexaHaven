@@ -7,6 +7,11 @@ import { clearLobbySession } from '../state/lobbyState';
 type BiomeType = 'OCEAN' | 'BEACH' | 'DESERT' | 'SAVANNAH' | 'FOREST' | 'JUNGLE' | 'MOUNTAIN' | 'ARCTIC';
 type MapSize = 'small' | 'medium' | 'large';
 
+interface MapGenSceneOptions {
+    mapSeed?: string | number;
+    allowPointerRegenerate?: boolean;
+}
+
 // Rich color palettes per biome (sampled by noise for variation)
 const BIOME_PALETTE: Record<BiomeType, number[]> = {
     OCEAN:    [0x0e3d5e, 0x154f72, 0x1a5276, 0x1f6896, 0x2980b9, 0x1b6ca0],
@@ -44,6 +49,39 @@ function seededRandom(q: number, r: number, i: number): number {
     seed = ((seed >> 16) ^ seed) * 0x45d9f3b;
     seed = (seed >> 16) ^ seed;
     return (seed & 0x7fffffff) / 0x7fffffff;
+}
+
+function hashStringToSeed(input: string): number {
+    let hash = 2166136261;
+    for (let i = 0; i < input.length; i += 1) {
+        hash ^= input.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+}
+
+function normalizeSeed(seed: string | number | undefined): number | null {
+    if (seed == null) {
+        return null;
+    }
+    if (typeof seed === 'number' && Number.isFinite(seed)) {
+        return Math.trunc(seed) >>> 0;
+    }
+    if (typeof seed === 'string' && seed.trim().length > 0) {
+        return hashStringToSeed(seed.trim());
+    }
+    return null;
+}
+
+function mulberry32(seed: number): () => number {
+    let state = seed >>> 0;
+    return () => {
+        state = (state + 0x6D2B79F5) >>> 0;
+        let t = state;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
 }
 
 // ─── Hex helpers ───
@@ -94,11 +132,11 @@ class TerrainGenerator {
     readonly dNoise: ReturnType<typeof createNoise2D>;
     readonly dNoise2: ReturnType<typeof createNoise2D>;
 
-    constructor() {
-        this.eNoise = createNoise2D();
-        this.mNoise = createNoise2D();
-        this.dNoise = createNoise2D();
-        this.dNoise2 = createNoise2D();
+    constructor(random: () => number) {
+        this.eNoise = createNoise2D(random);
+        this.mNoise = createNoise2D(random);
+        this.dNoise = createNoise2D(random);
+        this.dNoise2 = createNoise2D(random);
     }
     getElevation(x: number, y: number): number {
         let v = 0, a = 1, f = 1, m = 0;
@@ -324,8 +362,19 @@ export class MapGenTest extends Scene {
     private readonly mapZoom = 1.5;
     private canvasKey = 'terrainCanvas';
     private readonly sandBorderTextureKeys = ['beach-corner-1', 'beach-corner-2', 'beach-corner-3'] as const;
+    private readonly mapSeed: number | null;
+    private readonly allowPointerRegenerate: boolean;
+    private rng: () => number = Math.random;
 
-    constructor() { super('MapGenTest'); }
+    constructor(options?: MapGenSceneOptions) {
+        super('MapGenTest');
+        this.mapSeed = normalizeSeed(options?.mapSeed);
+        this.allowPointerRegenerate = options?.allowPointerRegenerate ?? true;
+    }
+
+    private resetRandomSource(): void {
+        this.rng = this.mapSeed == null ? Math.random : mulberry32(this.mapSeed);
+    }
 
     preload() {
         this.sandBorderTextureKeys.forEach((key, idx) => {
@@ -336,7 +385,8 @@ export class MapGenTest extends Scene {
     }
 
     regenerateMap(): void {
-        this.terrain = new TerrainGenerator();
+        this.resetRandomSource();
+        this.terrain = new TerrainGenerator(this.rng);
         this.generateMap('medium');
         this.renderMap();
     }
@@ -348,7 +398,9 @@ export class MapGenTest extends Scene {
         this.cameras.main.zoom = this.mapZoom;
         this.cameras.main.setBackgroundColor('rgba(0,0,0,0)');
 
-        this.input.on('pointerdown', () => this.regenerateMap());
+        if (this.allowPointerRegenerate) {
+            this.input.on('pointerdown', () => this.regenerateMap());
+        }
     }
 
     private generateMap(size: MapSize) {
@@ -364,7 +416,7 @@ export class MapGenTest extends Scene {
                     hex.elevation = this.terrain.getElevation(p.x, p.y);
                     hex.moisture = this.terrain.getMoisture(p.x, p.y);
                     hex.biome = determineBiome(hex.elevation, hex.moisture);
-                    hex.numberToken = TOKEN_POOL[Math.floor(Math.random() * TOKEN_POOL.length)];
+                    hex.numberToken = TOKEN_POOL[Math.floor(this.rng() * TOKEN_POOL.length)];
                     this.hexes.push(hex);
                     this.hexMap.set(hexKey(q, r), hex);
                 }
@@ -558,12 +610,24 @@ export class TestMapGenScreen {
     private game: Phaser.Game | null = null;
     private readonly showExitButton: boolean;
     private readonly enableBackgroundMusic: boolean;
+    private readonly mapSeed?: string | number;
+    private readonly showRegenerateButton: boolean;
+    private readonly allowPointerRegenerate: boolean;
     private readonly backgroundMusic = new Audio('/audio/game-board-theme.mp3');
     private isMusicMuted = false;
 
-    constructor(options?: { showExitButton?: boolean; enableBackgroundMusic?: boolean }) {
+    constructor(options?: {
+        showExitButton?: boolean;
+        enableBackgroundMusic?: boolean;
+        mapSeed?: string | number;
+        showRegenerateButton?: boolean;
+        allowPointerRegenerate?: boolean;
+    }) {
         this.showExitButton = options?.showExitButton ?? true;
         this.enableBackgroundMusic = options?.enableBackgroundMusic ?? true;
+        this.mapSeed = options?.mapSeed;
+        this.showRegenerateButton = options?.showRegenerateButton ?? true;
+        this.allowPointerRegenerate = options?.allowPointerRegenerate ?? true;
         this.backgroundMusic.loop = true;
         this.backgroundMusic.volume = 0.35;
     }
@@ -608,26 +672,30 @@ export class TestMapGenScreen {
         phaserMount.style.zIndex = '1';
         this.container.appendChild(phaserMount);
 
-        this.regenerateButton = document.createElement('button');
-        this.regenerateButton.textContent = 'Generate New Map';
-        this.regenerateButton.style.position = 'absolute';
-        this.regenerateButton.style.top = '16px';
-        this.regenerateButton.style.left = '16px';
-        this.regenerateButton.style.zIndex = '3';
-        this.regenerateButton.style.padding = '8px 10px';
-        this.regenerateButton.style.fontSize = '17px';
-        this.regenerateButton.style.fontWeight = '600';
-        this.regenerateButton.style.fontFamily = `'${TEST_MAP_BUTTON_FONT_FAMILY}', monospace`;
-        this.regenerateButton.style.color = '#ffffff';
-        this.regenerateButton.style.background = 'rgba(0, 0, 0, 0.7)';
-        this.regenerateButton.style.border = '1px solid rgba(255, 255, 255, 0.35)';
-        this.regenerateButton.style.borderRadius = '8px';
-        this.regenerateButton.style.cursor = 'pointer';
-        this.regenerateButton.onclick = () => {
-            const scene = this.game?.scene.getScene('MapGenTest') as MapGenTest | undefined;
-            scene?.regenerateMap();
-        };
-        this.container.appendChild(this.regenerateButton);
+        if (this.showRegenerateButton) {
+            this.regenerateButton = document.createElement('button');
+            this.regenerateButton.textContent = 'Generate New Map';
+            this.regenerateButton.style.position = 'absolute';
+            this.regenerateButton.style.top = '16px';
+            this.regenerateButton.style.left = '16px';
+            this.regenerateButton.style.zIndex = '3';
+            this.regenerateButton.style.padding = '8px 10px';
+            this.regenerateButton.style.fontSize = '17px';
+            this.regenerateButton.style.fontWeight = '600';
+            this.regenerateButton.style.fontFamily = `'${TEST_MAP_BUTTON_FONT_FAMILY}', monospace`;
+            this.regenerateButton.style.color = '#ffffff';
+            this.regenerateButton.style.background = 'rgba(0, 0, 0, 0.7)';
+            this.regenerateButton.style.border = '1px solid rgba(255, 255, 255, 0.35)';
+            this.regenerateButton.style.borderRadius = '8px';
+            this.regenerateButton.style.cursor = 'pointer';
+            this.regenerateButton.onclick = () => {
+                const scene = this.game?.scene.getScene('MapGenTest') as MapGenTest | undefined;
+                scene?.regenerateMap();
+            };
+            this.container.appendChild(this.regenerateButton);
+        } else {
+            this.regenerateButton = null;
+        }
 
         if (this.enableBackgroundMusic) {
             this.musicToggleButton = document.createElement('button');
@@ -679,7 +747,10 @@ export class TestMapGenScreen {
             width: window.innerWidth,
             height: window.innerHeight,
             transparent: true,
-            scene: MapGenTest,
+            scene: [new MapGenTest({
+                mapSeed: this.mapSeed,
+                allowPointerRegenerate: this.allowPointerRegenerate,
+            })],
             scale: {
                 mode: Phaser.Scale.FIT,
                 autoCenter: Phaser.Scale.CENTER_BOTH,
