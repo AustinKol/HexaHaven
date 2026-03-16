@@ -7,7 +7,7 @@ export interface RoomPlayer {
   points: number;
 }
 
-export { RoomStatus };
+export type { RoomStatus };
 
 export interface Room {
   id: string;
