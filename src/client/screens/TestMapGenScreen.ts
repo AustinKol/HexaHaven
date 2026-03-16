@@ -463,50 +463,66 @@ function drawEmberDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number
         g.fillEllipse(px, py, w, h);
     }
 
-    // Charred wood pieces on top
-    const woodCount = 3;
-    for (let i = 0; i < woodCount; i++) {
-        const dx = (seededRandom(q, r, 1701 + i * 2) - 0.5) * sz * 0.95;
-        const dy = (seededRandom(q, r, 1702 + i * 2) - 0.5) * sz * 0.75;
-        if (!isInsideHex(dx, dy, sz * 0.72)) continue;
-        const px = cx + dx;
-        const py = cy + dy;
-        const angle = seededRandom(q, r, 1730 + i) * Math.PI * 2;
-        const len = 15 + seededRandom(q, r, 1735 + i) * 12;
-        const half = len / 2;
+    // 3-log stack: two parallel base logs + one cross log on top.
+    const logLen = sz * 0.52;
+    const logRadius = sz * 0.115;
+    const drawCylinderLog = (px: number, py: number, angle: number): void => {
+        const half = logLen / 2;
         const ux = Math.cos(angle);
         const uy = Math.sin(angle);
         const vx = -uy;
         const vy = ux;
-        const thickness = 3.0 + seededRandom(q, r, 1740 + i) * 2.8;
-        const hx = vx * thickness;
-        const hy = vy * thickness;
+        const hx = vx * logRadius;
+        const hy = vy * logRadius;
         const ax = px - ux * half;
         const ay = py - uy * half;
         const bx = px + ux * half;
         const by = py + uy * half;
 
+        // Perfectly straight cylindrical body.
         g.fillStyle(0x7a5437, 0.94);
         g.fillTriangle(ax + hx, ay + hy, ax - hx, ay - hy, bx + hx, by + hy);
         g.fillTriangle(bx - hx, by - hy, ax - hx, ay - hy, bx + hx, by + hy);
-        g.lineStyle(1.0, 0x2a1d14, 0.78);
-        g.beginPath();
-        g.moveTo(ax, ay);
-        g.lineTo(bx, by);
-        g.strokePath();
+        // Lighter brown circular side (cut face) on the front/left end.
+        g.fillStyle(0xc28d5b, 0.98);
+        g.fillCircle(ax, ay, logRadius);
+        g.fillStyle(0x9f6f45, 0.62);
+        g.fillCircle(ax, ay, logRadius * 0.6);
+        g.lineStyle(0.55, 0x8a5d38, 0.42);
+        g.strokeCircle(ax, ay, logRadius * 0.82);
+        g.strokeCircle(ax, ay, logRadius * 0.44);
 
-        // Center char line to help logs read at distance.
-        g.lineStyle(0.8, 0x3a281d, 0.52);
-        g.beginPath();
-        g.moveTo(ax + ux * 1.5, ay + uy * 1.5);
-        g.lineTo(bx - ux * 1.5, by - uy * 1.5);
-        g.strokePath();
+        // Darker far end.
+        g.fillStyle(0x6a482f, 0.88);
+        g.fillCircle(bx, by, logRadius * 0.96);
 
-        // subtle hot tips
-        g.fillStyle(0xff6a2a, 0.38 + seededRandom(q, r, 1750 + i) * 0.36);
-        g.fillCircle(ax + ux * 1.8, ay + uy * 1.8, 1.9);
-        g.fillCircle(bx - ux * 1.8, by - uy * 1.8, 1.9);
-    }
+        // Bark lines / ecailles on the log.
+        const barkLineCount = 6;
+        for (let l = 0; l < barkLineCount; l++) {
+            const t = 0.14 + (l / (barkLineCount - 1)) * 0.72;
+            const lx = ax + (bx - ax) * t;
+            const ly = ay + (by - ay) * t;
+            const span = logRadius * (0.78 + (l % 2) * 0.16);
+            g.lineStyle(0.72, 0x4a2f1d, 0.46);
+            g.beginPath();
+            g.moveTo(lx - vx * span, ly - vy * span);
+            g.lineTo(lx + vx * span, ly + vy * span);
+            g.strokePath();
+        }
+    };
+
+    const stackAngle = -0.2;
+    // Triangular 3-log stack like reference (all parallel on diagonal).
+    const sideOffset = logRadius * 1.45;
+    const baseY = cy + logRadius * 0.92;
+    const leftY = baseY + logRadius * 0.12;
+    const rightY = baseY + logRadius * 0.18;
+    const topY = baseY - logRadius * 1.78;
+
+    // Draw order to keep all three cut faces visible (right-bottom comes forward).
+    drawCylinderLog(cx - sideOffset, leftY, stackAngle);
+    drawCylinderLog(cx, topY, stackAngle);
+    drawCylinderLog(cx + sideOffset, rightY, stackAngle);
 
     // More red/orange fire-ash dots
     const sparkCount = 26 + Math.floor(seededRandom(q, r, 1800) * 16);
