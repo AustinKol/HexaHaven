@@ -14,5 +14,12 @@ export interface RoomSnapshot {
     name: string;
     avatar: string;
     points: number;
+    resources: {
+      ember: number;
+      gold: number;
+      stone: number;
+      bloom: number;
+      crystal: number;
+    };
   }>;
 }

@@ -19,7 +19,23 @@ interface StartRoomBody {
 }
 
 function buildRoomSnapshot(
-  room: { id: string; players: Array<{ id: string; name: string; avatar: string; points: number }>; status: RoomStatus },
+  room: {
+    id: string;
+    players: Array<{
+      id: string;
+      name: string;
+      avatar: string;
+      points: number;
+      resources: {
+        ember: number;
+        gold: number;
+        stone: number;
+        bloom: number;
+        crystal: number;
+      };
+    }>;
+    status: RoomStatus;
+  },
 ): RoomSnapshot {
   return {
     roomId: room.id,
@@ -29,6 +45,7 @@ function buildRoomSnapshot(
       name: player.name,
       avatar: player.avatar,
       points: player.points,
+      resources: player.resources,
     })),
   };
 }

@@ -13,6 +13,13 @@ export class RoomManager {
       name: hostName.trim(),
       avatar: this.pickRandomAvatar([]),
       points: 0,
+      resources: {
+        ember: 0,
+        gold: 0,
+        stone: 0,
+        bloom: 0,
+        crystal: 0,
+      },
     };
     const room: Room = {
       id: roomId,
@@ -35,6 +42,13 @@ export class RoomManager {
       name: playerName.trim(),
       avatar: this.pickRandomAvatar(usedAvatars),
       points: 0,
+      resources: {
+        ember: 0,
+        gold: 0,
+        stone: 0,
+        bloom: 0,
+        crystal: 0,
+      },
     };
     room.players.push(player);
     return { room, player };
