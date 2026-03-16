@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import { ApiRoutes } from '../../../shared/constants/apiRoutes';
 import type { ApiResponse, RoomSnapshot } from '../../../shared/types/api';
-import type { RoomStatus } from '../../../shared/types/domain';
+import type { GameState, PlayerStats, ResourceBundle, RoomStatus } from '../../../shared/types/domain';
+import { GameEngine } from '../../engine/GameEngine';
+import type { Room } from '../../sessions/Room';
 import { roomManager } from '../../sessions/roomManagerSingleton';
 
 interface HostRoomBody {
@@ -16,6 +18,115 @@ interface JoinRoomBody {
 interface StartRoomBody {
   roomId?: string;
   playerId?: string;
+}
+
+const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#F7B801'] as const;
+
+const EMPTY_STATS: PlayerStats = {
+  publicVP: 0,
+  settlementsBuilt: 0,
+  roadsBuilt: 0,
+  totalResourcesCollected: 0,
+  totalResourcesSpent: 0,
+  longestRoadLength: 0,
+  turnsPlayed: 0,
+};
+
+const EMPTY_RESOURCES: ResourceBundle = {
+  CRYSTAL: 0,
+  STONE: 0,
+  BLOOM: 0,
+  EMBER: 0,
+  GOLD: 0,
+};
+
+const gameEngine = new GameEngine();
+
+function cloneStats(): PlayerStats {
+  return { ...EMPTY_STATS };
+}
+
+function cloneResources(): ResourceBundle {
+  return { ...EMPTY_RESOURCES };
+}
+
+function mapRoomResourcesToBundle(resources: {
+  ember: number;
+  gold: number;
+  stone: number;
+  bloom: number;
+  crystal: number;
+}): ResourceBundle {
+  return {
+    CRYSTAL: resources.crystal,
+    STONE: resources.stone,
+    BLOOM: resources.bloom,
+    EMBER: resources.ember,
+    GOLD: resources.gold,
+  };
+}
+
+function buildInitialGameStateFromRoom(room: Room): GameState {
+  const nowIso = new Date().toISOString();
+  const playerOrder = room.players.map((player) => player.id);
+
+  return {
+    gameId: room.id,
+    roomCode: room.id,
+    roomStatus: room.status,
+    createdBy: room.hostId,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    isDeleted: false,
+    winnerPlayerId: null,
+    config: {
+      playerCount: room.players.length,
+      goalCount: 0,
+      winRule: 'ALL_GOALS_COMPLETE',
+      mapSeed: 0,
+      mapSize: 'small',
+      timerEnabled: false,
+      turnTimeSec: null,
+      allowReroll: false,
+      startingResources: cloneResources(),
+    },
+    playerOrder,
+    playersById: Object.fromEntries(
+      room.players.map((player, index) => [
+        player.id,
+        {
+          playerId: player.id,
+          userId: player.id,
+          displayName: player.name,
+          color: PLAYER_COLORS[index % PLAYER_COLORS.length],
+          isHost: player.id === room.hostId,
+          resources: mapRoomResourcesToBundle(player.resources),
+          goals: [],
+          stats: cloneStats(),
+          presence: {
+            isConnected: true,
+            lastSeenAt: nowIso,
+            connectionId: '',
+          },
+          joinedAt: nowIso,
+          updatedAt: nowIso,
+        },
+      ]),
+    ),
+    board: {
+      tilesById: {},
+      structuresById: {},
+    },
+    turn: {
+      currentTurn: 0,
+      currentPlayerId: null,
+      currentPlayerIndex: null,
+      phase: null,
+      turnStartedAt: null,
+      turnEndsAt: null,
+      lastDiceRoll: null,
+    },
+  };
 }
 
 function buildRoomSnapshot(
@@ -106,12 +217,48 @@ roomsRouter.post(ApiRoutes.StartRoom, (req, res) => {
     return;
   }
 
-  const room = roomManager.startRoom(normalizedRoomId, normalizedPlayerId);
+  const room = roomManager.getRoom(normalizedRoomId);
   if (!room) {
+    const response: ApiResponse = { success: false, error: 'Room not found.' };
+    res.status(404).json(response);
+    return;
+  }
+
+  if (room.hostId !== normalizedPlayerId || room.status !== 'waiting' || room.players.length < 2) {
     const response: ApiResponse = { success: false, error: 'Unable to start game.' };
     res.status(403).json(response);
     return;
   }
+
+  const existingGameState = roomManager.getGameState(normalizedRoomId);
+  const gameState = existingGameState
+    ?? roomManager.initializeGameState(normalizedRoomId, buildInitialGameStateFromRoom(room));
+
+  if (!gameState) {
+    const response: ApiResponse = { success: false, error: 'Unable to initialize game state.' };
+    res.status(500).json(response);
+    return;
+  }
+
+  const engineResult = gameEngine.startGame(gameState);
+  if (!engineResult.ok) {
+    const response: ApiResponse = { success: false, error: engineResult.error.message };
+    res.status(403).json(response);
+    return;
+  }
+
+  const updatedGameState: GameState = {
+    ...engineResult.gameState,
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (!roomManager.setGameState(normalizedRoomId, updatedGameState)) {
+    const response: ApiResponse = { success: false, error: 'Unable to store game state.' };
+    res.status(500).json(response);
+    return;
+  }
+
+  room.status = updatedGameState.roomStatus;
 
   const response: ApiResponse<{ room: RoomSnapshot }> = {
     success: true,

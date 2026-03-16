@@ -1,10 +1,12 @@
 import type { Room, RoomPlayer } from './Room';
+import type { GameState } from '../../shared/types/domain';
 
 const AVATAR_POOL = ['/avatar/avatar_1.png', '/avatar/avatar_2.png', '/avatar/avatar_3.png', '/avatar/avatar_4.png'] as const;
 const MAX_PLAYERS_PER_ROOM = AVATAR_POOL.length;
 
 export class RoomManager {
   private readonly rooms = new Map<string, Room>();
+  private readonly gameStatesByRoomId = new Map<string, GameState>();
 
   createRoom(hostName: string): { room: Room; player: RoomPlayer } {
     const roomId = this.generateUniqueRoomId();
@@ -54,20 +56,47 @@ export class RoomManager {
     return { room, player };
   }
 
-  startRoom(roomId: string, hostId: string): Room | null {
-    const room = this.rooms.get(roomId);
-    if (!room) {
-      return null;
-    }
-    if (room.hostId !== hostId || room.status !== 'waiting' || room.players.length < 2) {
-      return null;
-    }
-    room.status = 'in_progress';
-    return room;
-  }
+  // startRoom(roomId: string, hostId: string): Room | null {
+  //   const room = this.rooms.get(roomId);
+  //   if (!room) {
+  //     return null;
+  //   }
+  //   if (room.hostId !== hostId || room.status !== 'waiting' || room.players.length < 2) {
+  //     return null;
+  //   }
+  //   room.status = 'in_progress';
+  //   return room;
+  // }
 
   getRoom(roomId: string): Room | null {
     return this.rooms.get(roomId) ?? null;
+  }
+
+  initializeGameState(roomId: string, gameState: GameState): GameState | null {
+    if (!this.rooms.has(roomId)) {
+      return null;
+    }
+
+    const existingGameState = this.gameStatesByRoomId.get(roomId);
+    if (existingGameState) {
+      return existingGameState;
+    }
+
+    this.gameStatesByRoomId.set(roomId, gameState);
+    return gameState;
+  }
+
+  setGameState(roomId: string, gameState: GameState): GameState | null {
+    if (!this.rooms.has(roomId)) {
+      return null;
+    }
+
+    this.gameStatesByRoomId.set(roomId, gameState);
+    return gameState;
+  }
+
+  getGameState(roomId: string): GameState | null {
+    return this.gameStatesByRoomId.get(roomId) ?? null;
   }
 
   private generateUniqueRoomId(): string {

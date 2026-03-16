@@ -44,6 +44,22 @@ function cloneStats(): PlayerStats {
   return { ...EMPTY_STATS };
 }
 
+function mapRoomResourcesToBundle(resources: {
+  ember: number;
+  gold: number;
+  stone: number;
+  bloom: number;
+  crystal: number;
+}): ResourceBundle {
+  return {
+    CRYSTAL: resources.crystal,
+    STONE: resources.stone,
+    BLOOM: resources.bloom,
+    EMBER: resources.ember,
+    GOLD: resources.gold,
+  };
+}
+
 function normalizeId(rawValue: unknown): string | null {
   if (typeof rawValue === 'string') {
     const value = rawValue.trim();
@@ -69,7 +85,7 @@ function buildInitialGameStateFromRoom(room: Room): GameState {
         displayName: player.name,
         color: PLAYER_COLORS[index % PLAYER_COLORS.length],
         isHost: player.id === room.hostId,
-        resources: cloneResources(),
+        resources: mapRoomResourcesToBundle(player.resources),
         goals: [],
         stats: cloneStats(),
         presence: {
@@ -140,6 +156,12 @@ function resolvePlayerId(socket: TypedSocket, gameState: GameState): string | nu
   return null;
 }
 
+function resolveRawPlayerId(socket: TypedSocket): string | null {
+  return normalizeId((socket.data as Record<string, unknown>).playerId)
+    ?? normalizeId((socket.handshake.auth as Record<string, unknown>).playerId)
+    ?? normalizeId((socket.handshake.query as Record<string, unknown>).playerId);
+}
+
 function rejectAction(socket: TypedSocket, ack: SimpleActionAck, error: AckError): void {
   socket.emit(SERVER_EVENTS.ACTION_REJECTED, {
     code: error.code,
@@ -163,7 +185,6 @@ export function registerSocketHandlers(
   io: Server<ClientToServerEvents, ServerToClientEvents>,
 ): void {
   const gameEngine = new GameEngine();
-  const gameStatesById = new Map<string, GameState>();
 
   io.on(SocketEvents.Connection, (socket) => {
     const handshakeGameId = normalizeId((socket.handshake.auth as Record<string, unknown>).gameId)
@@ -193,17 +214,42 @@ export function registerSocketHandlers(
 
       socket.join(gameId);
 
-      let gameState = gameStatesById.get(gameId);
+      const room = roomManager.getRoom(gameId);
+      if (!room) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Session not found for START_GAME.',
+        });
+        return;
+      }
+
+      const requesterPlayerId = resolveRawPlayerId(socket);
+      if (requesterPlayerId === null) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Player session not found for START_GAME.',
+        });
+        return;
+      }
+
+      if (requesterPlayerId !== room.hostId) {
+        rejectAction(socket, ack, {
+          code: 'NOT_HOST',
+          message: 'Only the host can start the game.',
+        });
+        return;
+      }
+
+      const existingGameState = roomManager.getGameState(gameId);
+      const gameState = existingGameState
+        ?? roomManager.initializeGameState(gameId, buildInitialGameStateFromRoom(room));
+
       if (!gameState) {
-        const room = roomManager.getRoom(gameId);
-        if (!room) {
-          rejectAction(socket, ack, {
-            code: 'SESSION_NOT_FOUND',
-            message: 'Session not found for START_GAME.',
-          });
-          return;
-        }
-        gameState = buildInitialGameStateFromRoom(room);
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Unable to initialize game state for START_GAME.',
+        });
+        return;
       }
 
       const engineResult = gameEngine.startGame(gameState);
@@ -217,11 +263,15 @@ export function registerSocketHandlers(
         updatedAt: new Date().toISOString(),
       };
 
-      gameStatesById.set(gameId, updatedGameState);
-      const room = roomManager.getRoom(gameId);
-      if (room) {
-        room.status = updatedGameState.roomStatus;
+      if (!roomManager.setGameState(gameId, updatedGameState)) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Unable to store game state for START_GAME.',
+        });
+        return;
       }
+
+      room.status = updatedGameState.roomStatus;
 
       completeAction(io, gameId, updatedGameState, ack);
     });
@@ -237,7 +287,7 @@ export function registerSocketHandlers(
       }
       const gameId = normalizedGameId.toUpperCase();
 
-      const gameState = gameStatesById.get(gameId);
+      const gameState = roomManager.getGameState(gameId);
       if (!gameState) {
         rejectAction(socket, ack, {
           code: 'SESSION_NOT_FOUND',
@@ -266,7 +316,14 @@ export function registerSocketHandlers(
         updatedAt: new Date().toISOString(),
       };
 
-      gameStatesById.set(gameId, updatedGameState);
+      if (!roomManager.setGameState(gameId, updatedGameState)) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Unable to store game state for ROLL_DICE.',
+        });
+        return;
+      }
+
       completeAction(io, gameId, updatedGameState, ack);
     });
 
@@ -281,7 +338,7 @@ export function registerSocketHandlers(
       }
       const gameId = normalizedGameId.toUpperCase();
 
-      const gameState = gameStatesById.get(gameId);
+      const gameState = roomManager.getGameState(gameId);
       if (!gameState) {
         rejectAction(socket, ack, {
           code: 'SESSION_NOT_FOUND',
@@ -310,7 +367,14 @@ export function registerSocketHandlers(
         updatedAt: new Date().toISOString(),
       };
 
-      gameStatesById.set(gameId, updatedGameState);
+      if (!roomManager.setGameState(gameId, updatedGameState)) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Unable to store game state for END_TURN.',
+        });
+        return;
+      }
+
       completeAction(io, gameId, updatedGameState, ack);
     });
 
