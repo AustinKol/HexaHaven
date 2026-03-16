@@ -4,7 +4,8 @@ import { ScreenId } from '../../shared/constants/screenIds';
 import { clearLobbySession } from '../state/lobbyState';
 
 // --- Types ---
-type BiomeType = 'OCEAN' | 'BEACH' | 'DESERT' | 'SAVANNAH' | 'FOREST' | 'JUNGLE' | 'MOUNTAIN' | 'ARCTIC';
+type BiomeType = 'STONE' | 'BLOOM' | 'EMBER' | 'CRYSTAL' | 'GOLD';
+type BiomeScores = Record<BiomeType, number>;
 type MapSize = 'small' | 'medium' | 'large';
 
 interface MapGenSceneOptions {
@@ -14,17 +15,15 @@ interface MapGenSceneOptions {
 
 // Rich color palettes per biome (sampled by noise for variation)
 const BIOME_PALETTE: Record<BiomeType, number[]> = {
-    OCEAN:    [0x0e3d5e, 0x154f72, 0x1a5276, 0x1f6896, 0x2980b9, 0x1b6ca0],
-    BEACH:    [0xd4bc82, 0xe0c892, 0xe8d4a2, 0xf0e0b8, 0xc8b070, 0xdcc898],
-    DESERT:   [0xc0a060, 0xccb478, 0xd4c090, 0xe0d0a0, 0xb89850, 0xd8c488],
-    SAVANNAH: [0x9a8a30, 0xaca040, 0xc4b86b, 0xd0c870, 0x8a7a20, 0xb4a850],
-    FOREST:   [0x1a3a0a, 0x224810, 0x2d5016, 0x3a6420, 0x4a7a20, 0x1e4010],
-    JUNGLE:   [0x0a2a14, 0x103820, 0x1a4d2e, 0x206038, 0x2a6a3e, 0x144428],
-    MOUNTAIN: [0x606050, 0x707060, 0x8b8b7a, 0x989888, 0xa0a090, 0x787868],
-    ARCTIC:   [0xc8d8e8, 0xd4e4f0, 0xdce8f0, 0xe8f0f8, 0xf0f4f8, 0xd0e0f0],
+    STONE:   [0x5a5a5a, 0x656565, 0x707070, 0x7a7a7a, 0x858585, 0x4f4f4f],
+    BLOOM:   [0x5d9a46, 0x6fb253, 0x80c261, 0x93cc74, 0xa4d78a, 0x74b95e],
+    EMBER:   [0x171717, 0x222222, 0x2a2a2a, 0x341010, 0x461313, 0x5a1818],
+    CRYSTAL: [0xa8c7d8, 0xb7d2e0, 0xc6dcea, 0xd3e5ef, 0xe0edf4, 0x95b8cc],
+    GOLD:    [0x9c7b1f, 0xb18b22, 0xc49a24, 0xd9ad2a, 0xe8bf3c, 0x8b6d1a],
 };
 
 const MAP_RADIUS: Record<MapSize, number> = { small: 1, medium: 2, large: 3 };
+const RESOURCE_BIOMES: BiomeType[] = ['STONE', 'BLOOM', 'EMBER', 'CRYSTAL', 'GOLD'];
 const TOKEN_POOL = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12];
 const HEX_DIRS: [number, number][] = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
 const TEST_MAP_BUTTON_FONT_FAMILY = '04b_30';
@@ -41,6 +40,21 @@ function samplePalette(biome: BiomeType, t: number): [number, number, number] {
     const pal = BIOME_PALETTE[biome];
     const idx = Math.min(Math.floor(t * pal.length), pal.length - 1);
     return hexToRGB(pal[idx]);
+}
+function clamp01(value: number): number {
+    return Math.max(0, Math.min(1, value));
+}
+function ridge(value: number): number {
+    return 1 - Math.abs(value * 2 - 1);
+}
+function createBiomeCountRecord(initialValue = 0): Record<BiomeType, number> {
+    return {
+        STONE: initialValue,
+        BLOOM: initialValue,
+        EMBER: initialValue,
+        CRYSTAL: initialValue,
+        GOLD: initialValue,
+    };
 }
 
 function seededRandom(q: number, r: number, i: number): number {
@@ -120,7 +134,8 @@ function isInsideHex(px: number, py: number, size: number): boolean {
 // ─── Classes ───
 class Hex {
     q: number; r: number; s: number;
-    biome: BiomeType = 'OCEAN';
+    biome: BiomeType = 'STONE';
+    biomeScores: BiomeScores = { STONE: 0, BLOOM: 0, EMBER: 0, CRYSTAL: 0, GOLD: 0 };
     numberToken: number | null = null;
     elevation = 0; moisture = 0;
     constructor(q: number, r: number) { this.q = q; this.r = r; this.s = -q - r; }
@@ -152,14 +167,30 @@ class TerrainGenerator {
     getDetail2(x: number, y: number): number { return (this.dNoise2(x * 0.8, y * 0.8) + 1) / 2; }
 }
 
-function determineBiome(e: number, m: number): BiomeType {
-    if (e < 0.35) return 'OCEAN';
-    if (e < 0.40) return 'BEACH';
-    if (e > 0.80) return 'ARCTIC';
-    if (e > 0.70) return 'MOUNTAIN';
-    if (e < 0.50) { if (m > 0.75) return 'JUNGLE'; if (m > 0.55) return 'FOREST'; }
-    if (e < 0.65) { if (m > 0.60) return 'FOREST'; if (m > 0.35) return 'SAVANNAH'; return 'DESERT'; }
-    return 'SAVANNAH';
+function computeBiomeScores(e: number, m: number, d1: number, d2: number): BiomeScores {
+    const midElevation = 1 - Math.abs(e - 0.55) * 2;
+    const dryness = 1 - m;
+    const contrast = Math.abs(d1 - d2);
+
+    return {
+        STONE: clamp01(0.55 * e + 0.25 * dryness + 0.20 * ridge(d1)),
+        BLOOM: clamp01(0.58 * m + 0.22 * clamp01(midElevation) + 0.20 * d2),
+        EMBER: clamp01(0.52 * dryness + 0.30 * (1 - e) + 0.18 * d1),
+        CRYSTAL: clamp01(0.42 * e + 0.28 * m + 0.15 * contrast + 0.15 * ridge(d2)),
+        GOLD: clamp01(0.35 * ridge(d1) + 0.35 * ridge(d2) + 0.30 * contrast),
+    };
+}
+function pickTopBiome(scores: BiomeScores): BiomeType {
+    let best = RESOURCE_BIOMES[0];
+    let bestScore = scores[best];
+    for (let i = 1; i < RESOURCE_BIOMES.length; i++) {
+        const biome = RESOURCE_BIOMES[i];
+        if (scores[biome] > bestScore) {
+            best = biome;
+            bestScore = scores[biome];
+        }
+    }
+    return best;
 }
 
 // Detail overlay drawing functions
@@ -347,10 +378,341 @@ function drawArcticDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: numbe
     }
 }
 
+function drawStoneDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
+    const pieceCount = 20 + Math.floor(seededRandom(q, r, 1200) * 10);
+    for (let i = 0; i < pieceCount; i++) {
+        const dx = (seededRandom(q, r, 1201 + i * 2) - 0.5) * sz * 1.35;
+        const dy = (seededRandom(q, r, 1202 + i * 2) - 0.5) * sz * 1.15;
+        if (!isInsideHex(dx, dy, sz * 0.78)) continue;
+        const px = cx + dx;
+        const py = cy + dy;
+        const w = 5.1 + seededRandom(q, r, 1230 + i) * 9.9;
+        const h = 4.2 + seededRandom(q, r, 1260 + i) * 8.0;
+        const stoneShade = [0x5d5d5d, 0x676767, 0x717171][Math.floor(seededRandom(q, r, 1290 + i) * 3)];
+        g.fillStyle(stoneShade, 0.76 + seededRandom(q, r, 1320 + i) * 0.14);
+        g.fillEllipse(px, py, w, h);
+        g.lineStyle(0.55, 0x4a4a4a, 0.5);
+        g.strokeEllipse(px, py, w, h);
+
+        const chipX = px - w * 0.22 + (seededRandom(q, r, 1330 + i) - 0.5) * 0.9;
+        const chipY = py - h * 0.2 + (seededRandom(q, r, 1340 + i) - 0.5) * 0.8;
+        g.fillStyle(0x8b8b8b, 0.16 + seededRandom(q, r, 1350 + i) * 0.12);
+        g.fillEllipse(chipX, chipY, Math.max(2.1, w * 0.24), Math.max(1.7, h * 0.22));
+    }
+}
+
+function drawBloomDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
+    const stemCount = 14 + Math.floor(seededRandom(q, r, 1400) * 8);
+    for (let i = 0; i < stemCount; i++) {
+        const dx = (seededRandom(q, r, 1401 + i * 3) - 0.5) * sz * 1.2;
+        const dy = (seededRandom(q, r, 1402 + i * 3) - 0.5) * sz * 1.0;
+        if (!isInsideHex(dx, dy, sz * 0.75)) continue;
+        const px = cx + dx;
+        const py = cy + dy;
+        const isHeroFlower = seededRandom(q, r, 1410 + i) > 0.62;
+        const stemH = (isHeroFlower ? 6 : 4) + seededRandom(q, r, 1430 + i) * (isHeroFlower ? 7 : 5);
+        g.lineStyle(isHeroFlower ? 1.2 : 0.9, 0x2f7f2f, isHeroFlower ? 0.62 : 0.5);
+        g.beginPath();
+        g.moveTo(px, py);
+        g.lineTo(px, py - stemH);
+        g.strokePath();
+
+        const topX = px;
+        const topY = py - stemH;
+        const petalColor = [0xff8fd1, 0xffd95a, 0xffffff, 0xff9aa2, 0xdcb8ff][Math.floor(seededRandom(q, r, 1460 + i) * 5)];
+        const petalR = (isHeroFlower ? 2.4 : 1.6) + seededRandom(q, r, 1490 + i) * (isHeroFlower ? 2.8 : 2.2);
+        const petalSize = (isHeroFlower ? 2.0 : 1.3) + seededRandom(q, r, 1560 + i) * (isHeroFlower ? 1.5 : 1.2);
+        const petalCount = isHeroFlower ? 6 : 5;
+        for (let p = 0; p < petalCount; p++) {
+            const ang = (Math.PI * 2 * p) / petalCount + seededRandom(q, r, 1520 + i) * 0.25;
+            g.fillStyle(petalColor, isHeroFlower ? 0.82 : 0.66);
+            g.fillCircle(topX + Math.cos(ang) * petalR, topY + Math.sin(ang) * petalR, petalSize);
+        }
+        g.fillStyle(0xf7e37c, isHeroFlower ? 0.95 : 0.82);
+        g.fillCircle(topX, topY, isHeroFlower ? 1.8 : 1.25);
+        if (isHeroFlower) {
+            g.fillStyle(0xffffff, 0.45);
+            g.fillCircle(topX - 0.6, topY - 0.6, 0.8);
+        }
+    }
+
+    // Bright pollen-like sparkle dots to make bloom read clearly at distance.
+    const sparkleCount = 10 + Math.floor(seededRandom(q, r, 1580) * 8);
+    for (let i = 0; i < sparkleCount; i++) {
+        const dx = (seededRandom(q, r, 1581 + i * 2) - 0.5) * sz * 1.25;
+        const dy = (seededRandom(q, r, 1582 + i * 2) - 0.5) * sz * 1.05;
+        if (!isInsideHex(dx, dy, sz * 0.78)) continue;
+        const c = seededRandom(q, r, 1590 + i) > 0.5 ? 0xfff3a6 : 0xffe0ff;
+        g.fillStyle(c, 0.3 + seededRandom(q, r, 1595 + i) * 0.35);
+        g.fillCircle(cx + dx, cy + dy, 0.7 + seededRandom(q, r, 1598 + i) * 1.1);
+    }
+}
+
+function drawEmberDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
+    // Dark coal bed
+    const coalCount = 14 + Math.floor(seededRandom(q, r, 1600) * 8);
+    for (let i = 0; i < coalCount; i++) {
+        const dx = (seededRandom(q, r, 1601 + i * 2) - 0.5) * sz * 1.25;
+        const dy = (seededRandom(q, r, 1602 + i * 2) - 0.5) * sz * 1.05;
+        if (!isInsideHex(dx, dy, sz * 0.78)) continue;
+        const px = cx + dx;
+        const py = cy + dy;
+        const w = 1.5 + seededRandom(q, r, 1630 + i) * 3.6;
+        const h = 1.0 + seededRandom(q, r, 1660 + i) * 2.6;
+        g.fillStyle(0x161616, 0.7);
+        g.fillEllipse(px, py, w, h);
+    }
+
+    // Charred wood pieces on top
+    const woodCount = 3;
+    for (let i = 0; i < woodCount; i++) {
+        const dx = (seededRandom(q, r, 1701 + i * 2) - 0.5) * sz * 0.95;
+        const dy = (seededRandom(q, r, 1702 + i * 2) - 0.5) * sz * 0.75;
+        if (!isInsideHex(dx, dy, sz * 0.72)) continue;
+        const px = cx + dx;
+        const py = cy + dy;
+        const angle = seededRandom(q, r, 1730 + i) * Math.PI * 2;
+        const len = 15 + seededRandom(q, r, 1735 + i) * 12;
+        const half = len / 2;
+        const ux = Math.cos(angle);
+        const uy = Math.sin(angle);
+        const vx = -uy;
+        const vy = ux;
+        const thickness = 3.0 + seededRandom(q, r, 1740 + i) * 2.8;
+        const hx = vx * thickness;
+        const hy = vy * thickness;
+        const ax = px - ux * half;
+        const ay = py - uy * half;
+        const bx = px + ux * half;
+        const by = py + uy * half;
+
+        g.fillStyle(0x7a5437, 0.94);
+        g.fillTriangle(ax + hx, ay + hy, ax - hx, ay - hy, bx + hx, by + hy);
+        g.fillTriangle(bx - hx, by - hy, ax - hx, ay - hy, bx + hx, by + hy);
+        g.lineStyle(1.0, 0x2a1d14, 0.78);
+        g.beginPath();
+        g.moveTo(ax, ay);
+        g.lineTo(bx, by);
+        g.strokePath();
+
+        // Center char line to help logs read at distance.
+        g.lineStyle(0.8, 0x3a281d, 0.52);
+        g.beginPath();
+        g.moveTo(ax + ux * 1.5, ay + uy * 1.5);
+        g.lineTo(bx - ux * 1.5, by - uy * 1.5);
+        g.strokePath();
+
+        // subtle hot tips
+        g.fillStyle(0xff6a2a, 0.38 + seededRandom(q, r, 1750 + i) * 0.36);
+        g.fillCircle(ax + ux * 1.8, ay + uy * 1.8, 1.9);
+        g.fillCircle(bx - ux * 1.8, by - uy * 1.8, 1.9);
+    }
+
+    // More red/orange fire-ash dots
+    const sparkCount = 26 + Math.floor(seededRandom(q, r, 1800) * 16);
+    for (let i = 0; i < sparkCount; i++) {
+        const dx = (seededRandom(q, r, 1801 + i * 2) - 0.5) * sz * 1.2;
+        const dy = (seededRandom(q, r, 1802 + i * 2) - 0.5) * sz * 1.0;
+        if (!isInsideHex(dx, dy, sz * 0.78)) continue;
+        const glow = seededRandom(q, r, 1830 + i);
+        const color = glow > 0.75 ? 0xffb347 : glow > 0.4 ? 0xff4a1f : 0xcf1717;
+        g.fillStyle(color, 0.4 + glow * 0.34);
+        g.fillCircle(cx + dx, cy + dy, 0.45 + glow * 0.8);
+    }
+
+    // Fine ember ash flecks
+    const ashDotCount = 20 + Math.floor(seededRandom(q, r, 1900) * 14);
+    for (let i = 0; i < ashDotCount; i++) {
+        const dx = (seededRandom(q, r, 1901 + i * 2) - 0.5) * sz * 1.25;
+        const dy = (seededRandom(q, r, 1902 + i * 2) - 0.5) * sz * 1.05;
+        if (!isInsideHex(dx, dy, sz * 0.8)) continue;
+        const heat = seededRandom(q, r, 1930 + i);
+        const color = heat > 0.62 ? 0xff4a1f : 0xb31515;
+        g.fillStyle(color, 0.14 + heat * 0.24);
+        g.fillCircle(cx + dx, cy + dy, 0.2 + heat * 0.34);
+    }
+}
+
+function drawCrystalDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
+    // Crystal colonies: shared rocky matrix + parallel growth + radiating druzy needles.
+    const colonyCount = 2;
+    for (let c = 0; c < colonyCount; c++) {
+        const baseDx = (seededRandom(q, r, 1901 + c * 2) - 0.5) * sz * 0.45;
+        const baseDy = (seededRandom(q, r, 1902 + c * 2) - 0.5) * sz * 0.35;
+        if (!isInsideHex(baseDx, baseDy, sz * 0.58)) continue;
+        const bx = cx + baseDx;
+        const by = cy + baseDy;
+
+        // Shared matrix rock at the base
+        const matrixW = 14 + seededRandom(q, r, 1930 + c) * 11.5;
+        const matrixH = 7 + seededRandom(q, r, 1940 + c) * 5.8;
+        g.fillStyle(0x788a9c, 0.5);
+        g.fillEllipse(bx, by + 1.5, matrixW, matrixH);
+        g.fillStyle(0x5a6879, 0.4);
+        g.fillEllipse(bx - 1.2, by + 2.2, matrixW * 0.7, matrixH * 0.62);
+
+        // Parallel-growth crystal prisms from matrix
+        const parallelCount = 4 + Math.floor(seededRandom(q, r, 1950 + c) * 2);
+        for (let i = 0; i < parallelCount; i++) {
+            const slot = parallelCount <= 1 ? 0 : i / (parallelCount - 1) - 0.5;
+            const px = bx + slot * matrixW * 0.74 + (seededRandom(q, r, 1960 + c * 10 + i) - 0.5) * 1.4;
+            const py = by + (seededRandom(q, r, 1970 + c * 10 + i) - 0.5) * 0.9;
+            if (!isInsideHex(px - cx, py - cy, sz * 0.72)) continue;
+            const h = 16 + seededRandom(q, r, 1980 + c * 10 + i) * 15.5;
+            const w = 4.2 + seededRandom(q, r, 1990 + c * 10 + i) * 5.0;
+            const tilt = (seededRandom(q, r, 2000 + c * 10 + i) - 0.5) * 1.4;
+            const tipX = px + tilt;
+            const tipY = py - h;
+
+            g.fillStyle(0xdcf0fb, 0.9);
+            g.fillTriangle(tipX, tipY, px - w, py, px, py);
+            g.fillStyle(0xb9d9ed, 0.84);
+            g.fillTriangle(tipX, tipY, px, py, px + w, py);
+            g.fillStyle(0xffffff, 0.52);
+            g.fillRect(px - 1.2, py - h * 0.76, 2.4, h * 0.64);
+            g.lineStyle(1.0, 0x8db3ca, 0.56);
+            g.strokeTriangle(tipX, tipY, px - w, py, px + w, py);
+        }
+
+        // Radiating druzy needles around colony shoulders
+        const needleCount = 8 + Math.floor(seededRandom(q, r, 2010 + c) * 5);
+        for (let i = 0; i < needleCount; i++) {
+            const ang = seededRandom(q, r, 2020 + c * 20 + i) * Math.PI * 2;
+            const ring = matrixW * (0.18 + seededRandom(q, r, 2030 + c * 20 + i) * 0.24);
+            const sx = bx + Math.cos(ang) * ring;
+            const sy = by + Math.sin(ang) * (matrixH * 0.28);
+            if (!isInsideHex(sx - cx, sy - cy, sz * 0.78)) continue;
+            const len = 5.6 + seededRandom(q, r, 2040 + c * 20 + i) * 9.4;
+            const dir = ang + (seededRandom(q, r, 2050 + c * 20 + i) - 0.5) * 0.8;
+            const ex = sx + Math.cos(dir) * len;
+            const ey = sy - Math.abs(Math.sin(dir)) * len;
+            if (!isInsideHex(ex - cx, ey - cy, sz * 0.8)) continue;
+
+            g.lineStyle(1.2, 0xd9f0fc, 0.58);
+            g.beginPath();
+            g.moveTo(sx, sy);
+            g.lineTo(ex, ey);
+            g.strokePath();
+            g.fillStyle(0xf8fdff, 0.68);
+            g.fillCircle(ex, ey, 1.0);
+        }
+    }
+
+    // Geode-like inner lining of tiny crystals near tile interior.
+    const liningCount = 10 + Math.floor(seededRandom(q, r, 2100) * 6);
+    for (let i = 0; i < liningCount; i++) {
+        const ang = seededRandom(q, r, 2101 + i) * Math.PI * 2;
+        const radial = sz * (0.12 + seededRandom(q, r, 2110 + i) * 0.28);
+        const px = cx + Math.cos(ang) * radial;
+        const py = cy + Math.sin(ang) * radial * 0.76;
+        if (!isInsideHex(px - cx, py - cy, sz * 0.62)) continue;
+        const h = 5 + seededRandom(q, r, 2120 + i) * 7.8;
+        const w = 1.8 + seededRandom(q, r, 2130 + i) * 2.8;
+        const tipX = px + Math.cos(ang) * w * 0.4;
+        const tipY = py - h;
+        g.fillStyle(0xe1f2fb, 0.82);
+        g.fillTriangle(tipX, tipY, px - w, py, px + w, py);
+        g.lineStyle(0.6, 0x9fc3d8, 0.46);
+        g.strokeTriangle(tipX, tipY, px - w, py, px + w, py);
+    }
+}
+
 const BIOME_DETAIL: Record<BiomeType, (g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) => void> = {
-    OCEAN: drawOceanDetails, BEACH: drawBeachDetails, DESERT: drawDesertDetails,
-    SAVANNAH: drawSavannahDetails, FOREST: drawForestDetails, JUNGLE: drawJungleDetails,
-    MOUNTAIN: drawMountainDetails, ARCTIC: drawArcticDetails,
+    STONE: (g, cx, cy, sz, q, r) => {
+        drawStoneDetails(g, cx, cy, sz, q, r);
+    },
+    BLOOM: (g, cx, cy, sz, q, r) => {
+        drawBloomDetails(g, cx, cy, sz, q, r);
+    },
+    EMBER: (g, cx, cy, sz, q, r) => {
+        drawEmberDetails(g, cx, cy, sz, q, r);
+    },
+    CRYSTAL: (g, cx, cy, sz, q, r) => {
+        drawCrystalDetails(g, cx, cy, sz, q, r);
+    },
+    GOLD: (g, cx, cy, sz, q, r) => {
+        const drawBullion = (x: number, y: number, w: number, h: number, inset: number, seedIdx: number): void => {
+            // Front trapezoid
+            const blx = x - w / 2;
+            const bly = y + h / 2;
+            const brx = x + w / 2;
+            const bry = y + h / 2;
+            const trx = x + w / 2 - inset;
+            const trY = y - h / 2;
+            const tlx = x - w / 2 + inset;
+            const tlY = y - h / 2;
+
+            g.fillStyle(0xc9972d, 0.94);
+            g.beginPath();
+            g.moveTo(blx, bly);
+            g.lineTo(brx, bry);
+            g.lineTo(trx, trY);
+            g.lineTo(tlx, tlY);
+            g.closePath();
+            g.fillPath();
+            g.lineStyle(0.9, 0x805e16, 0.7);
+            g.strokePath();
+
+            // Flat top face
+            const topLift = Math.max(1.1, h * 0.32);
+            const tx1 = tlx;
+            const ty1 = tlY;
+            const tx2 = trx;
+            const ty2 = trY;
+            const tx3 = trx - inset * 0.45;
+            const ty3 = trY - topLift;
+            const tx4 = tlx + inset * 0.45;
+            const ty4 = tlY - topLift;
+            const topColor = [0xffe384, 0xf8d96a, 0xeec14d][Math.floor(seededRandom(q, r, seedIdx) * 3)];
+
+            g.fillStyle(topColor, 0.9);
+            g.beginPath();
+            g.moveTo(tx1, ty1);
+            g.lineTo(tx2, ty2);
+            g.lineTo(tx3, ty3);
+            g.lineTo(tx4, ty4);
+            g.closePath();
+            g.fillPath();
+            g.lineStyle(0.75, 0xb88b2a, 0.62);
+            g.strokePath();
+
+            // Subtle shine dot
+            g.fillStyle(0xfff3b5, 0.65);
+            g.fillCircle((tx1 + tx2) * 0.5 - w * 0.12, (ty3 + ty1) * 0.5, 0.9 + seededRandom(q, r, seedIdx + 99) * 0.75);
+        };
+
+        // Stable pyramid stack: 4-3-2-1 bars, centered in tile.
+        const layers = 4;
+        const baseW = 15.8;
+        const baseH = 6.0;
+        let seedCounter = 1100;
+        for (let layer = 0; layer < layers; layer++) {
+            const barsInLayer = layers - layer;
+            const y = cy + sz * 0.28 - layer * (baseH * 1.1);
+            for (let b = 0; b < barsInLayer; b++) {
+                const spread = barsInLayer <= 1 ? 0 : b / (barsInLayer - 1) - 0.5;
+                const x = cx + spread * (baseW * 0.86 * barsInLayer) + (seededRandom(q, r, seedCounter) - 0.5) * 1.4;
+                if (!isInsideHex(x - cx, y - cy, sz * 0.9)) {
+                    seedCounter += 3;
+                    continue;
+                }
+                const w = baseW + seededRandom(q, r, seedCounter + 1) * 3.0;
+                const h = baseH + seededRandom(q, r, seedCounter + 2) * 1.5;
+                const inset = Math.max(1.4, w * 0.17);
+                drawBullion(x, y, w, h, inset, seedCounter + 3);
+                seedCounter += 7;
+            }
+        }
+
+        const sparkleCount = 14 + Math.floor(seededRandom(q, r, 1010) * 7);
+        for (let i = 0; i < sparkleCount; i++) {
+            const dx = (seededRandom(q, r, 1011 + i * 2) - 0.5) * sz * 1.05;
+            const dy = (seededRandom(q, r, 1012 + i * 2) - 0.5) * sz * 0.9;
+            if (!isInsideHex(dx, dy, sz * 0.76)) continue;
+            g.fillStyle(0xffe58f, 0.32 + seededRandom(q, r, 1030 + i) * 0.4);
+            g.fillCircle(cx + dx, cy + dy, 0.9 + seededRandom(q, r, 1040 + i) * 1.1);
+        }
+    },
 };
 
 export class MapGenTest extends Scene {
@@ -415,11 +777,96 @@ export class MapGenTest extends Scene {
                     const p = hexToPixel(q, r, this.hexSize);
                     hex.elevation = this.terrain.getElevation(p.x, p.y);
                     hex.moisture = this.terrain.getMoisture(p.x, p.y);
-                    hex.biome = determineBiome(hex.elevation, hex.moisture);
+                    const d1 = this.terrain.getDetail(p.x, p.y);
+                    const d2 = this.terrain.getDetail2(p.x, p.y);
+                    hex.biomeScores = computeBiomeScores(hex.elevation, hex.moisture, d1, d2);
+                    hex.biome = pickTopBiome(hex.biomeScores);
                     hex.numberToken = TOKEN_POOL[Math.floor(this.rng() * TOKEN_POOL.length)];
                     this.hexes.push(hex);
                     this.hexMap.set(hexKey(q, r), hex);
                 }
+            }
+        }
+
+        this.balanceBiomeDistribution();
+    }
+
+    private buildEqualTargets(totalTiles: number): Record<BiomeType, number> {
+        const targets = createBiomeCountRecord(Math.floor(totalTiles / RESOURCE_BIOMES.length));
+        const remainder = totalTiles % RESOURCE_BIOMES.length;
+        const order = [...RESOURCE_BIOMES];
+        for (let i = order.length - 1; i > 0; i--) {
+            const j = Math.floor(this.rng() * (i + 1));
+            const tmp = order[i];
+            order[i] = order[j];
+            order[j] = tmp;
+        }
+        for (let i = 0; i < remainder; i++) {
+            targets[order[i]] += 1;
+        }
+        return targets;
+    }
+
+    private countBiomes(): Record<BiomeType, number> {
+        const counts = createBiomeCountRecord(0);
+        for (const hex of this.hexes) {
+            counts[hex.biome] += 1;
+        }
+        return counts;
+    }
+
+    private reassignBestCandidate(targetBiome: BiomeType, counts: Record<BiomeType, number>, minDonorCount: number): boolean {
+        let bestHex: Hex | null = null;
+        let bestPenalty = Number.POSITIVE_INFINITY;
+        let bestTie = Number.POSITIVE_INFINITY;
+
+        for (const hex of this.hexes) {
+            if (hex.biome === targetBiome) continue;
+            const donorBiome = hex.biome;
+            if (counts[donorBiome] <= minDonorCount) continue;
+
+            const penalty = hex.biomeScores[donorBiome] - hex.biomeScores[targetBiome];
+            const tieBreak = seededRandom(hex.q, hex.r, 2000 + targetBiome.length);
+            if (
+                penalty < bestPenalty - 1e-9 ||
+                (Math.abs(penalty - bestPenalty) <= 1e-9 && tieBreak < bestTie)
+            ) {
+                bestHex = hex;
+                bestPenalty = penalty;
+                bestTie = tieBreak;
+            }
+        }
+
+        if (!bestHex) return false;
+        counts[bestHex.biome] -= 1;
+        bestHex.biome = targetBiome;
+        counts[targetBiome] += 1;
+        return true;
+    }
+
+    private balanceBiomeDistribution(): void {
+        if (this.hexes.length < RESOURCE_BIOMES.length) return;
+
+        const targets = this.buildEqualTargets(this.hexes.length);
+        const counts = this.countBiomes();
+
+        for (const biome of RESOURCE_BIOMES) {
+            while (counts[biome] === 0) {
+                const changed = this.reassignBestCandidate(biome, counts, 1);
+                if (!changed) break;
+            }
+        }
+
+        let moved = true;
+        let safety = 0;
+        const maxMoves = this.hexes.length * RESOURCE_BIOMES.length * 2;
+        while (moved && safety < maxMoves) {
+            moved = false;
+            safety += 1;
+            for (const biome of RESOURCE_BIOMES) {
+                if (counts[biome] >= targets[biome]) continue;
+                const changed = this.reassignBestCandidate(biome, counts, targets[biome]);
+                if (changed) moved = true;
             }
         }
     }
@@ -438,13 +885,14 @@ export class MapGenTest extends Scene {
 
         const sz = this.hexSize;
         const pad = sz * 2;
+        const verticalPad = sz * 0.8;
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         for (const hex of this.hexes) {
             const p = hexToPixel(hex.q, hex.r, sz);
             minX = Math.min(minX, p.x - sz); maxX = Math.max(maxX, p.x + sz);
             minY = Math.min(minY, p.y - sz); maxY = Math.max(maxY, p.y + sz);
         }
-        minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+        minX -= pad; minY -= (pad + verticalPad); maxX += pad; maxY += (pad + verticalPad);
         const w = Math.ceil(maxX - minX);
         const h = Math.ceil(maxY - minY);
 
@@ -516,20 +964,7 @@ export class MapGenTest extends Scene {
             BIOME_DETAIL[hex.biome](graphics, p.x, p.y, sz, hex.q, hex.r);
         }
 
-        const outlineG = this.add.graphics().setDepth(2);
-        outlineG.lineStyle(0.8, 0x000000, 0.15);
-        for (const hex of this.hexes) {
-            const p = hexToPixel(hex.q, hex.r, sz);
-            outlineG.beginPath();
-            for (let i = 0; i < 6; i++) {
-                const a = (Math.PI / 3) * i;
-                const vx = p.x + sz * Math.cos(a);
-                const vy = p.y + sz * Math.sin(a);
-                if (i === 0) outlineG.moveTo(vx, vy); else outlineG.lineTo(vx, vy);
-            }
-            outlineG.closePath();
-            outlineG.strokePath();
-        }
+        this.drawNoisyTileOutlines(sz);
 
         this.drawSandBorder(sz);
 
@@ -588,13 +1023,84 @@ export class MapGenTest extends Scene {
                 const textureIdx = Math.floor(seededRandom(hex.q, hex.r, dirIdx * 17 + 900) * this.sandBorderTextureKeys.length);
                 const textureKey = this.sandBorderTextureKeys[Math.min(this.sandBorderTextureKeys.length - 1, textureIdx)];
                 const edgeAngle = Math.atan2(by - ay, bx - ax);
-                const outwardOffset = -sz * 0.04;
+                const outwardOffset = sz * 0.16;
 
                 this.add.image(mx + ux * outwardOffset, my + uy * outwardOffset, textureKey)
                     .setDepth(borderDepth)
                     .setDisplaySize(imageWidth, imageLength)
-                    .setRotation(edgeAngle - Math.PI / 2)
+                    .setRotation(edgeAngle + Math.PI / 2)
                     .setAlpha(0.95);
+            }
+        }
+    }
+
+    private drawNoisyTileOutlines(sz: number): void {
+        const outlineG = this.add.graphics().setDepth(2);
+        const baseLineColor = 0xd1c295;
+        const baseLineWidth = 5.4;
+        const sandTones = [0xd1c295, 0xc4b27f, 0xe0d1a8, 0xbda66d] as const;
+        const jitterScale = sz * 0.045;
+
+        for (const hex of this.hexes) {
+            const p = hexToPixel(hex.q, hex.r, sz);
+            const vertices = Array.from({ length: 6 }, (_, i) => {
+                const a = (Math.PI / 3) * i;
+                return {
+                    x: p.x + sz * Math.cos(a),
+                    y: p.y + sz * Math.sin(a),
+                };
+            });
+
+            for (let edgeIdx = 0; edgeIdx < 6; edgeIdx++) {
+                const a = vertices[edgeIdx];
+                const b = vertices[(edgeIdx + 1) % 6];
+                const ex = b.x - a.x;
+                const ey = b.y - a.y;
+                const edgeLen = Math.hypot(ex, ey);
+                if (edgeLen < 0.001) continue;
+                const nx = -ey / edgeLen;
+                const ny = ex / edgeLen;
+                const tx = ex / edgeLen;
+                const ty = ey / edgeLen;
+
+                // Keep a thick base separator line under the sand dots.
+                outlineG.lineStyle(baseLineWidth, baseLineColor, 1);
+                outlineG.beginPath();
+                outlineG.moveTo(a.x, a.y);
+                outlineG.lineTo(b.x, b.y);
+                outlineG.strokePath();
+
+                // Dots-only separator: dense tiny grains distributed along each edge.
+                const speckleCount = 28;
+                for (let i = 0; i < speckleCount; i++) {
+                    const t = seededRandom(hex.q, hex.r, 5600 + edgeIdx * 37 + i * 17);
+                    const baseX = a.x + ex * t;
+                    const baseY = a.y + ey * t;
+                    const spread = jitterScale * 0.8;
+                    const normalJitter = (seededRandom(hex.q, hex.r, 5700 + edgeIdx * 37 + i * 17) - 0.5) * 2 * spread;
+                    const tangentJitter = (seededRandom(hex.q, hex.r, 5800 + edgeIdx * 37 + i * 17) - 0.5) * 2 * spread * 0.45;
+                    const radius = 0.08 + seededRandom(hex.q, hex.r, 5900 + edgeIdx * 37 + i * 17) * 0.18;
+                    const alpha = 0.78 + seededRandom(hex.q, hex.r, 6000 + edgeIdx * 37 + i * 17) * 0.22;
+                    const sx = baseX + nx * normalJitter + tx * tangentJitter;
+                    const sy = baseY + ny * normalJitter + ty * tangentJitter;
+                    const speckleToneIdx = Math.floor(seededRandom(hex.q, hex.r, 6100 + edgeIdx * 37 + i * 17) * sandTones.length);
+                    const speckleTone = sandTones[Math.min(sandTones.length - 1, speckleToneIdx)];
+                    outlineG.fillStyle(speckleTone, alpha);
+                    outlineG.fillCircle(sx, sy, radius);
+                }
+
+                const grainCount = 18;
+                for (let i = 0; i < grainCount; i++) {
+                    const t = seededRandom(hex.q, hex.r, 6200 + edgeIdx * 41 + i * 19);
+                    const gx = a.x + ex * t + nx * ((seededRandom(hex.q, hex.r, 6300 + edgeIdx * 41 + i * 19) - 0.5) * jitterScale * 1.6);
+                    const gy = a.y + ey * t + ny * ((seededRandom(hex.q, hex.r, 6400 + edgeIdx * 41 + i * 19) - 0.5) * jitterScale * 1.6);
+                    const grainToneIdx = Math.floor(seededRandom(hex.q, hex.r, 6500 + edgeIdx * 41 + i * 19) * sandTones.length);
+                    const grainTone = sandTones[Math.min(sandTones.length - 1, grainToneIdx)];
+                    const grainRadius = 0.05 + seededRandom(hex.q, hex.r, 6600 + edgeIdx * 41 + i * 19) * 0.1;
+                    const grainAlpha = 0.7 + seededRandom(hex.q, hex.r, 6700 + edgeIdx * 41 + i * 19) * 0.3;
+                    outlineG.fillStyle(grainTone, grainAlpha);
+                    outlineG.fillCircle(gx, gy, grainRadius);
+                }
             }
         }
     }
