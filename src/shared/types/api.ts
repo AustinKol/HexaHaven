@@ -12,5 +12,7 @@ export interface RoomSnapshot {
   players: Array<{
     id: string;
     name: string;
+    avatar: string;
+    points: number;
   }>;
 }

@@ -1,5 +1,8 @@
 import type { Room, RoomPlayer } from './Room';
 
+const AVATAR_POOL = ['/avatar/avatar_1.png', '/avatar/avatar_2.png', '/avatar/avatar_3.png', '/avatar/avatar_4.png'] as const;
+const MAX_PLAYERS_PER_ROOM = AVATAR_POOL.length;
+
 export class RoomManager {
   private readonly rooms = new Map<string, Room>();
 
@@ -8,6 +11,8 @@ export class RoomManager {
     const hostPlayer: RoomPlayer = {
       id: this.generatePlayerId(),
       name: hostName.trim(),
+      avatar: this.pickRandomAvatar([]),
+      points: 0,
     };
     const room: Room = {
       id: roomId,
@@ -21,12 +26,15 @@ export class RoomManager {
 
   joinRoom(roomId: string, playerName: string): { room: Room; player: RoomPlayer } | null {
     const room = this.rooms.get(roomId);
-    if (!room || room.status !== 'waiting' || room.players.length >= 2) {
+    if (!room || room.status !== 'waiting' || room.players.length >= MAX_PLAYERS_PER_ROOM) {
       return null;
     }
+    const usedAvatars = room.players.map((roomPlayer) => roomPlayer.avatar);
     const player: RoomPlayer = {
       id: this.generatePlayerId(),
       name: playerName.trim(),
+      avatar: this.pickRandomAvatar(usedAvatars),
+      points: 0,
     };
     room.players.push(player);
     return { room, player };
@@ -67,5 +75,14 @@ export class RoomManager {
 
   private generatePlayerId(): string {
     return `p_${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  private pickRandomAvatar(excludedAvatars: string[]): string {
+    const available = AVATAR_POOL.filter((avatar) => !excludedAvatars.includes(avatar));
+    if (available.length === 0) {
+      return AVATAR_POOL[0];
+    }
+    const randomIndex = Math.floor(Math.random() * available.length);
+    return available[randomIndex];
   }
 }

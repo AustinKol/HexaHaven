@@ -18,13 +18,17 @@ interface StartRoomBody {
   playerId?: string;
 }
 
-function buildRoomSnapshot(room: { id: string; players: Array<{ id: string; name: string }>; status: RoomStatus }): RoomSnapshot {
+function buildRoomSnapshot(
+  room: { id: string; players: Array<{ id: string; name: string; avatar: string; points: number }>; status: RoomStatus },
+): RoomSnapshot {
   return {
     roomId: room.id,
     status: room.status,
     players: room.players.map((player) => ({
       id: player.id,
       name: player.name,
+      avatar: player.avatar,
+      points: player.points,
     })),
   };
 }

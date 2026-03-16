@@ -82,9 +82,18 @@ export class WaitingRoomScreen {
       playerList.innerHTML = '';
       room.players.forEach((player, index) => {
         const row = document.createElement('div');
-        row.className = 'font-hexahaven-ui px-3 py-2 rounded-md bg-slate-800 border border-slate-700';
+        row.className = 'font-hexahaven-ui px-3 py-2 rounded-md bg-slate-800 border border-slate-700 flex items-center gap-3';
         const isHost = player.id === room.players[0]?.id;
-        row.textContent = `${index + 1}. ${player.name}${isHost ? ' (Host)' : ''}`;
+        const avatar = document.createElement('img');
+        avatar.src = player.avatar;
+        avatar.alt = `${player.name} avatar`;
+        avatar.className = 'h-12 w-12 bg-transparent object-cover';
+
+        const playerText = document.createElement('span');
+        playerText.textContent = `${index + 1}. ${player.name}${isHost ? ' (Host)' : ''}`;
+
+        row.appendChild(avatar);
+        row.appendChild(playerText);
         playerList.appendChild(row);
       });
     };
@@ -96,9 +105,7 @@ export class WaitingRoomScreen {
       }
       if (session.role === 'host') {
         statusText.textContent =
-          room.players.length < 2
-            ? 'Waiting for another player to join...'
-            : 'A player joined. Click "Start Game" when ready.';
+          room.players.length < 2 ? 'Waiting for at least one more player to join...' : 'Players joined. Click "Start Game" when ready.';
         return;
       }
       statusText.textContent =
