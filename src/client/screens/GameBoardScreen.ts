@@ -153,9 +153,20 @@ export class GameBoardScreen {
       points.className = 'font-hexahaven-ui mt-2 text-xs text-slate-200 text-center';
       points.textContent = `Points: ${player.points}`;
 
+      const resources = document.createElement('div');
+      resources.className = 'font-hexahaven-ui mt-2 text-xs leading-5';
+      resources.innerHTML = [
+        `<span style="color: #c28d5b;">Ember: ${player.resources?.ember ?? 0}</span>`,
+        `<span style="color: #fde047;">Gold: ${player.resources?.gold ?? 0}</span>`,
+        `<span style="color: #a3a3a3;">Stone: ${player.resources?.stone ?? 0}</span>`,
+        `<span style="color: #74b95e;">Bloom: ${player.resources?.bloom ?? 0}</span>`,
+        `<span style="color: #ffffff;">Crystal: ${player.resources?.crystal ?? 0}</span>`,
+      ].join('<br>');
+
       card.appendChild(avatar);
       card.appendChild(name);
       card.appendChild(points);
+      card.appendChild(resources);
       this.playerPanel?.appendChild(card);
     });
   }

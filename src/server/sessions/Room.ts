@@ -5,6 +5,13 @@ export interface RoomPlayer {
   name: string;
   avatar: string;
   points: number;
+  resources: {
+    ember: number;
+    gold: number;
+    stone: number;
+    bloom: number;
+    crystal: number;
+  };
 }
 
 export { RoomStatus };
