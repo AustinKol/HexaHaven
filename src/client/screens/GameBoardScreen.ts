@@ -1,9 +1,24 @@
 import { ScreenId } from '../../shared/constants/screenIds';
 import { ApiRoutes } from '../../shared/constants/apiRoutes';
 import type { ApiResponse, RoomSnapshot } from '../../shared/types/api';
+import type { DiceRoll, GamePhase } from '../../shared/types/domain';
 import { apiFetch } from '../networking/apiClient';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
 import { TestMapGenScreen } from './TestMapGenScreen';
+
+export interface GameBoardTurnHudLiveValues {
+  currentPlayer?: string | null;
+  currentPhase?: GamePhase | null;
+  lastDiceRoll?: DiceRoll | string | null;
+  canRollDice?: boolean;
+  canEndTurn?: boolean;
+}
+
+export interface GameBoardTurnHudBindings {
+  getValues?: () => GameBoardTurnHudLiveValues | null;
+  onRollDice?: () => void;
+  onEndTurn?: () => void;
+}
 
 export class GameBoardScreen {
   readonly id = ScreenId.GameBoard;
@@ -21,6 +36,7 @@ export class GameBoardScreen {
   private buttonContainer: HTMLElement | null = null;
   private playersPollTimer: number | null = null;
   private isMusicMuted = false;
+  private turnHudBindings: GameBoardTurnHudBindings | null = null;
   private fallbackPlayerOrder: string[] = [];
   private fallbackCurrentPlayerIndex = 0;
   private fallbackPhase: 'ROLL' | 'ACTION' = 'ROLL';
@@ -29,6 +45,11 @@ export class GameBoardScreen {
   constructor() {
     this.backgroundMusic.loop = true;
     this.backgroundMusic.volume = 0.35;
+  }
+
+  setTurnHudBindings(bindings: GameBoardTurnHudBindings | null): void {
+    this.turnHudBindings = bindings;
+    this.updateTurnHud();
   }
 
   render(parentElement: HTMLElement, onComplete?: () => void, navigate?: (screenId: ScreenId) => void): void {
@@ -156,12 +177,12 @@ export class GameBoardScreen {
     const rollDiceButton = document.createElement('button');
     rollDiceButton.className = 'font-hexahaven-ui rounded-md border border-cyan-400/60 bg-cyan-900/60 px-2 py-2 text-xs font-semibold';
     rollDiceButton.textContent = 'Roll Dice';
-    rollDiceButton.addEventListener('click', () => this.handleDemoRollDice());
+    rollDiceButton.addEventListener('click', () => this.handleRollDiceClick());
 
     const endTurnButton = document.createElement('button');
     endTurnButton.className = 'font-hexahaven-ui rounded-md border border-emerald-400/60 bg-emerald-900/60 px-2 py-2 text-xs font-semibold';
     endTurnButton.textContent = 'End Turn';
-    endTurnButton.addEventListener('click', () => this.handleDemoEndTurn());
+    endTurnButton.addEventListener('click', () => this.handleEndTurnClick());
 
     actions.appendChild(rollDiceButton);
     actions.appendChild(endTurnButton);
@@ -278,31 +299,74 @@ export class GameBoardScreen {
   }
 
   private updateTurnHud(): void {
-    const currentPlayer = this.fallbackPlayerOrder[this.fallbackCurrentPlayerIndex] ?? 'Waiting for player state';
+    const liveValues = this.turnHudBindings?.getValues?.() ?? null;
+    const currentPlayer = liveValues?.currentPlayer ?? this.fallbackPlayerOrder[this.fallbackCurrentPlayerIndex] ?? 'Waiting for player state';
+    const currentPhase: GamePhase | 'ROLL' | 'ACTION' = liveValues?.currentPhase ?? this.fallbackPhase;
+    const lastDiceRollText = this.formatLastDiceRollDisplay(liveValues?.lastDiceRoll);
+
+    const canRoll = typeof liveValues?.canRollDice === 'boolean'
+      ? liveValues.canRollDice
+      : currentPhase === 'ROLL';
+    const canEnd = typeof liveValues?.canEndTurn === 'boolean'
+      ? liveValues.canEndTurn
+      : currentPhase === 'ACTION';
+
     if (this.currentPlayerValue) {
       this.currentPlayerValue.textContent = currentPlayer;
     }
 
     if (this.currentPhaseValue) {
-      this.currentPhaseValue.textContent = this.fallbackPhase;
-      this.currentPhaseValue.style.color = this.fallbackPhase === 'ROLL' ? '#67e8f9' : '#86efac';
+      this.currentPhaseValue.textContent = currentPhase ?? 'Waiting';
+      this.currentPhaseValue.style.color = currentPhase === 'ROLL' ? '#67e8f9' : '#86efac';
     }
 
     if (this.lastDiceRollValue) {
-      this.lastDiceRollValue.textContent = this.fallbackLastDiceRoll;
+      this.lastDiceRollValue.textContent = lastDiceRollText;
     }
 
     if (this.rollDiceButton) {
-      this.rollDiceButton.disabled = this.fallbackPhase !== 'ROLL';
+      this.rollDiceButton.disabled = !canRoll;
       this.rollDiceButton.style.opacity = this.rollDiceButton.disabled ? '0.55' : '1';
       this.rollDiceButton.style.cursor = this.rollDiceButton.disabled ? 'not-allowed' : 'pointer';
     }
 
     if (this.endTurnButton) {
-      this.endTurnButton.disabled = this.fallbackPhase !== 'ACTION';
+      this.endTurnButton.disabled = !canEnd;
       this.endTurnButton.style.opacity = this.endTurnButton.disabled ? '0.55' : '1';
       this.endTurnButton.style.cursor = this.endTurnButton.disabled ? 'not-allowed' : 'pointer';
     }
+  }
+
+  private formatLastDiceRollDisplay(lastDiceRoll: DiceRoll | string | null | undefined): string {
+    if (typeof lastDiceRoll === 'string') {
+      return lastDiceRoll;
+    }
+
+    if (lastDiceRoll) {
+      return `${lastDiceRoll.d1Val} + ${lastDiceRoll.d2Val} = ${lastDiceRoll.sum}`;
+    }
+
+    return this.fallbackLastDiceRoll;
+  }
+
+  private handleRollDiceClick(): void {
+    if (this.turnHudBindings?.onRollDice) {
+      this.turnHudBindings.onRollDice();
+      this.updateTurnHud();
+      return;
+    }
+
+    this.handleDemoRollDice();
+  }
+
+  private handleEndTurnClick(): void {
+    if (this.turnHudBindings?.onEndTurn) {
+      this.turnHudBindings.onEndTurn();
+      this.updateTurnHud();
+      return;
+    }
+
+    this.handleDemoEndTurn();
   }
 
   private handleDemoRollDice(): void {
