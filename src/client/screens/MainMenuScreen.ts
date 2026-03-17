@@ -42,7 +42,7 @@ export class MainMenuScreen {
     // Subtitle
     const subtitle = document.createElement('p');
     subtitle.className = 'font-hexahaven-ui text-xl text-slate-300 mb-12 drop-shadow-md';
-    subtitle.textContent = 'Master the Hexagon Strategy Game';
+    subtitle.textContent = 'Shape your haven, one turn at a time!';
 
     // Button container
     const buttonContainer = document.createElement('div');
