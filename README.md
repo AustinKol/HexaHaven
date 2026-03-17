@@ -22,6 +22,12 @@ Players share a room key, join a lobby, and compete on a hexagonal map where til
 
 ## How to Build
 
+Run all commands below from the project root folder:
+
+```bash
+cd /path/to/HexaHaven
+```
+
 ### Prerequisites
 
 - Node.js 18+ (recommended: latest LTS)
