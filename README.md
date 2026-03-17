@@ -21,12 +21,7 @@ Players share a room key, join a lobby, and compete on a hexagonal map where til
 6. **Win condition:** the first player to complete all 3 goals wins.
 
 ## How to Build
-
 Run all commands below from the project root folder:
-
-```bash
-cd /path/to/HexaHaven
-```
 
 ### Prerequisites
 
