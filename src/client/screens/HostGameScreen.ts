@@ -3,6 +3,7 @@ import { ApiRoutes } from '../../shared/constants/apiRoutes';
 import type { ApiResponse, RoomSnapshot } from '../../shared/types/api';
 import { apiFetch } from '../networking/apiClient';
 import { setLobbySession } from '../state/lobbyState';
+import { createMusicToggleButton } from '../ui/musicToggleButton';
 
 export class HostGameScreen {
   readonly id = ScreenId.HostGame;
@@ -101,6 +102,7 @@ export class HostGameScreen {
     card.appendChild(startButton);
     card.appendChild(backButton);
     this.container.appendChild(card);
+    this.container.appendChild(createMusicToggleButton());
     parentElement.appendChild(this.container);
     nameInput.focus();
   }

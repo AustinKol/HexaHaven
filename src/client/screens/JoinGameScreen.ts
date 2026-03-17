@@ -3,6 +3,7 @@ import { ApiRoutes } from '../../shared/constants/apiRoutes';
 import type { ApiResponse, RoomSnapshot } from '../../shared/types/api';
 import { apiFetch } from '../networking/apiClient';
 import { setLobbySession } from '../state/lobbyState';
+import { createMusicToggleButton } from '../ui/musicToggleButton';
 
 export class JoinGameScreen {
   readonly id = ScreenId.JoinGame;
@@ -115,6 +116,7 @@ export class JoinGameScreen {
     card.appendChild(joinButton);
     card.appendChild(backButton);
     this.container.appendChild(card);
+    this.container.appendChild(createMusicToggleButton());
     parentElement.appendChild(this.container);
     nameInput.focus();
   }

@@ -3,6 +3,7 @@ import { ApiRoutes } from '../../shared/constants/apiRoutes';
 import type { ApiResponse, RoomSnapshot } from '../../shared/types/api';
 import { apiFetch } from '../networking/apiClient';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
+import { createMusicToggleButton } from '../ui/musicToggleButton';
 
 export class WaitingRoomScreen {
   readonly id = ScreenId.WaitingRoom;
@@ -76,6 +77,7 @@ export class WaitingRoomScreen {
     card.appendChild(startButton);
     card.appendChild(leaveButton);
     this.container.appendChild(card);
+    this.container.appendChild(createMusicToggleButton());
     parentElement.appendChild(this.container);
 
     const renderPlayers = (room: RoomSnapshot) => {

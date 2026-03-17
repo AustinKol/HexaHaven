@@ -1221,21 +1221,23 @@ export class TestMapGenScreen {
 
         if (this.enableBackgroundMusic) {
             this.musicToggleButton = document.createElement('button');
+            this.musicToggleButton.type = 'button';
             this.musicToggleButton.style.position = 'absolute';
-            this.musicToggleButton.style.top = '62px';
-            this.musicToggleButton.style.left = '16px';
+            this.musicToggleButton.style.bottom = '16px';
+            this.musicToggleButton.style.right = '16px';
             this.musicToggleButton.style.zIndex = '3';
-            this.musicToggleButton.style.padding = '8px 10px';
-            this.musicToggleButton.style.fontSize = '14px';
-            this.musicToggleButton.style.fontWeight = '600';
-            this.musicToggleButton.style.fontFamily = `'${TEST_MAP_BUTTON_FONT_FAMILY}', monospace`;
+            this.musicToggleButton.style.display = 'flex';
+            this.musicToggleButton.style.alignItems = 'center';
+            this.musicToggleButton.style.justifyContent = 'center';
+            this.musicToggleButton.style.width = '44px';
+            this.musicToggleButton.style.height = '44px';
             this.musicToggleButton.style.color = '#ffffff';
             this.musicToggleButton.style.background = 'rgba(15, 23, 42, 0.85)';
             this.musicToggleButton.style.border = '1px solid rgba(255, 255, 255, 0.35)';
-            this.musicToggleButton.style.borderRadius = '8px';
+            this.musicToggleButton.style.borderRadius = '9999px';
             this.musicToggleButton.style.cursor = 'pointer';
             this.musicToggleButton.onclick = () => this.toggleMusic();
-            this.updateMusicButtonText();
+            this.updateMusicButtonIcon();
             this.container.appendChild(this.musicToggleButton);
         }
 
@@ -1299,12 +1301,17 @@ export class TestMapGenScreen {
     private toggleMusic(): void {
         this.isMusicMuted = !this.isMusicMuted;
         this.backgroundMusic.muted = this.isMusicMuted;
-        this.updateMusicButtonText();
+        this.updateMusicButtonIcon();
     }
 
-    private updateMusicButtonText(): void {
+    private updateMusicButtonIcon(): void {
         if (!this.musicToggleButton) return;
-        this.musicToggleButton.textContent = this.isMusicMuted ? 'Music: Off' : 'Music: On';
+        const speakerOnIcon = '<svg aria-hidden="true" viewBox="0 0 24 24" style="width:20px;height:20px;fill:currentColor;"><path d="M14 3.23a1 1 0 0 0-1.65-.76L7.88 6H4a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3.88l4.47 3.53A1 1 0 0 0 14 20.77zM19.07 4.93a1 1 0 1 0-1.41 1.41 8 8 0 0 1 0 11.32 1 1 0 1 0 1.41 1.41 10 10 0 0 0 0-14.14m-2.83 2.83a1 1 0 0 0-1.41 1.41 4 4 0 0 1 0 5.66 1 1 0 1 0 1.41 1.41 6 6 0 0 0 0-8.48"/></svg>';
+        const speakerOffIcon = '<svg aria-hidden="true" viewBox="0 0 24 24" style="width:20px;height:20px;fill:currentColor;"><path d="M14 3.23a1 1 0 0 0-1.65-.76L7.88 6H4a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3.88l4.47 3.53A1 1 0 0 0 14 20.77zM21.71 7.71a1 1 0 0 0-1.42-1.42L18 8.59l-2.29-2.3a1 1 0 0 0-1.42 1.42L16.59 10l-2.3 2.29a1 1 0 1 0 1.42 1.42L18 11.41l2.29 2.3a1 1 0 0 0 1.42-1.42L19.41 10z"/></svg>';
+        const isEnabled = !this.isMusicMuted;
+        this.musicToggleButton.innerHTML = isEnabled ? speakerOnIcon : speakerOffIcon;
+        this.musicToggleButton.title = isEnabled ? 'Stop music' : 'Start music';
+        this.musicToggleButton.setAttribute('aria-label', isEnabled ? 'Stop music' : 'Start music');
     }
 
     destroy(): void {

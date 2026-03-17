@@ -1,6 +1,7 @@
 let menuMusic: HTMLAudioElement | null = null;
 let listenersBound = false;
-let shouldBePlaying = false;
+let shouldBePlayingForScreen = false;
+let isEnabledByUser = true;
 
 function getMenuMusic(): HTMLAudioElement {
   if (!menuMusic) {
@@ -12,7 +13,7 @@ function getMenuMusic(): HTMLAudioElement {
 }
 
 function tryPlay(): void {
-  if (!shouldBePlaying) {
+  if (!shouldBePlayingForScreen || !isEnabledByUser) {
     return;
   }
   const audio = getMenuMusic();
@@ -34,13 +35,31 @@ function bindInteractionRetry(): void {
 }
 
 export function startMenuMusic(): void {
-  shouldBePlaying = true;
+  shouldBePlayingForScreen = true;
   bindInteractionRetry();
   tryPlay();
 }
 
 export function stopMenuMusic(): void {
-  shouldBePlaying = false;
+  shouldBePlayingForScreen = false;
+  if (!menuMusic) {
+    return;
+  }
+  menuMusic.pause();
+  menuMusic.currentTime = 0;
+}
+
+export function isMenuMusicEnabled(): boolean {
+  return isEnabledByUser;
+}
+
+export function setMenuMusicEnabled(enabled: boolean): void {
+  isEnabledByUser = enabled;
+  if (isEnabledByUser) {
+    bindInteractionRetry();
+    tryPlay();
+    return;
+  }
   if (!menuMusic) {
     return;
   }

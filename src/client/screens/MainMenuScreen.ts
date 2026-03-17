@@ -1,4 +1,5 @@
 import { ScreenId } from '../../shared/constants/screenIds';
+import { createMusicToggleButton } from '../ui/musicToggleButton';
 
 export class MainMenuScreen {
   readonly id = ScreenId.MainMenu;
@@ -72,9 +73,12 @@ export class MainMenuScreen {
     content.appendChild(subtitle);
     content.appendChild(buttonContainer);
 
+    const musicToggleBtn = createMusicToggleButton();
+
     this.container.appendChild(backgroundVideo);
     this.container.appendChild(overlay);
     this.container.appendChild(content);
+    this.container.appendChild(musicToggleBtn);
 
     parentElement.appendChild(this.container);
   }
