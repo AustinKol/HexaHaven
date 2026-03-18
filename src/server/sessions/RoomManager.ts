@@ -57,6 +57,27 @@ export class RoomManager {
     return { room, player };
   }
 
+  leaveRoom(roomId: string, playerId: string): Room | null {
+    const room = this.rooms.get(roomId);
+    if (!room) {
+      return null;
+    }
+
+    // Host leaves -> delete room
+    if (room.hostId === playerId) {
+      this.rooms.delete(roomId);
+      this.gameStatesByRoomId.delete(roomId);
+      return null;
+    }
+
+    // Guest leaves -> remove player (FIXED)
+    const updatedPlayers = room.players.filter((player) => player.id !== playerId);
+    room.players.length = 0;
+    room.players.push(...updatedPlayers);
+
+    return room;
+  }
+
   // startRoom(roomId: string, hostId: string): Room | null {
   //   const room = this.rooms.get(roomId);
   //   if (!room) {

@@ -68,9 +68,30 @@ export class WaitingRoomScreen {
     const leaveButton = document.createElement('button');
     leaveButton.className = 'w-full font-hexahaven-ui px-4 py-3 bg-slate-700 rounded-lg hover:bg-slate-600 transition-colors';
     leaveButton.textContent = 'Leave';
-    leaveButton.addEventListener('click', () => {
-      clearLobbySession();
-      this.navigate?.(ScreenId.MainMenu);
+    leaveButton.addEventListener('click', async () => {
+      try {
+        console.error('Leave button clicked', {
+          roomId: session.roomId,
+          playerId: session.playerId,
+          route: ApiRoutes.LeaveRoom,
+        });
+
+        const response = await apiFetch(ApiRoutes.LeaveRoom, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            roomId: session.roomId,
+            playerId: session.playerId,
+          }),
+        });
+
+        console.error('Leave response:', response);
+      } catch (error) {
+        console.error('Leave request failed:', error);
+      } finally {
+        clearLobbySession();
+        this.navigate?.(ScreenId.MainMenu);
+      }
     });
 
     card.appendChild(title);

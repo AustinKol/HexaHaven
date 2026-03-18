@@ -21,6 +21,13 @@ interface StartRoomBody {
   playerId?: string;
 }
 
+interface LeaveRoomBody {
+  roomId?: string;
+  playerId?: string;
+  
+}
+
+
 const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#F7B801'] as const;
 
 const EMPTY_STATS: PlayerStats = {
@@ -284,6 +291,35 @@ roomsRouter.get(`${ApiRoutes.RoomStatus}/:roomId`, (req, res) => {
     success: true,
     data: {
       room: buildRoomSnapshot(room),
+    },
+  };
+  res.json(response);
+});
+
+roomsRouter.post('/api/rooms/leave', (req, res) => {
+  const { roomId, playerId } = (req.body ?? {}) as LeaveRoomBody;
+  const normalizedRoomId = roomId?.trim().toUpperCase() ?? '';
+  const normalizedPlayerId = playerId?.trim() ?? '';
+
+  if (!normalizedRoomId || !normalizedPlayerId) {
+    const response: ApiResponse = { success: false, error: 'Room key and player id are required.' };
+    res.status(400).json(response);
+    return;
+  }
+
+  const updatedRoom = roomManager.leaveRoom(normalizedRoomId, normalizedPlayerId);
+
+  // Host left -> room deleted
+  if (!updatedRoom) {
+    const response: ApiResponse = { success: true };
+    res.json(response);
+    return;
+  }
+
+  const response: ApiResponse<{ room: RoomSnapshot }> = {
+    success: true,
+    data: {
+      room: buildRoomSnapshot(updatedRoom),
     },
   };
   res.json(response);
