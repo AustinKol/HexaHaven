@@ -1,6 +1,59 @@
 rules_version = '2';
+
+// HexaHaven Firestore Security Rules
+//
+// Architecture: Server-authoritative.
+//   - All writes go through the Node.js server using the Firebase Admin SDK,
+//     which bypasses these rules entirely.
+//   - Clients (browsers) use the Firebase client SDK for real-time reads only.
+//   - Therefore: clients get read access on game/player/board/turn data;
+//     all client writes are denied.
+
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // ── /games/{gameId} ───────────────────────────────────────────────────
+    // Top-level game session document.
+    match /games/{gameId} {
+      allow read: if resource == null || !resource.data.isDeleted;
+      allow write: if false;
+
+      // ── /games/{gameId}/players/{playerId} ──────────────────────────────
+      match /players/{playerId} {
+        allow read: if true;
+        allow write: if false;
+      }
+
+      // ── /games/{gameId}/board/{document=**} ─────────────────────────────
+      // Covers both the intermediate "state" document and the
+      // tiles / structures subcollections beneath it.
+      match /board/{document=**} {
+        allow read: if true;
+        allow write: if false;
+      }
+
+      // ── /games/{gameId}/turns/{turnId} ──────────────────────────────────
+      match /turns/{turnId} {
+        allow read: if true;
+        allow write: if false;
+      }
+    }
+
+    // ── /users/{userId} ───────────────────────────────────────────────────
+    // User profile document.
+    match /users/{userId} {
+      allow read: if true;
+      allow write: if false;
+
+      // ── /users/{userId}/activeGames/{gameId} ────────────────────────────
+      // Quick lookup of a user's active sessions.
+      match /activeGames/{gameId} {
+        allow read: if true;
+        allow write: if false;
+      }
+    }
+
+    // Deny everything else.
     match /{document=**} {
       allow read, write: if false;
     }
