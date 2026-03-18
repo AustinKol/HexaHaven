@@ -21,4 +21,5 @@ export interface Room {
   hostId: string;
   players: RoomPlayer[];
   status: RoomStatus;
+  maxPlayers: number;
 }

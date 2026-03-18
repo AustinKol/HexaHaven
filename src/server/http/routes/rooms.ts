@@ -8,6 +8,7 @@ import { roomManager } from '../../sessions/roomManagerSingleton';
 
 interface HostRoomBody {
   name?: string;
+  maxPlayers?: number;
 }
 
 interface JoinRoomBody {
@@ -146,11 +147,13 @@ function buildRoomSnapshot(
       };
     }>;
     status: RoomStatus;
+    maxPlayers: number;
   },
 ): RoomSnapshot {
   return {
     roomId: room.id,
     status: room.status,
+    maxPlayers: room.maxPlayers,
     players: room.players.map((player) => ({
       id: player.id,
       name: player.name,
@@ -164,14 +167,14 @@ function buildRoomSnapshot(
 const roomsRouter = Router();
 
 roomsRouter.post(ApiRoutes.HostRoom, (req, res) => {
-  const { name } = (req.body ?? {}) as HostRoomBody;
+  const { name, maxPlayers } = (req.body ?? {}) as HostRoomBody;
   const trimmedName = name?.trim() ?? '';
   if (!trimmedName) {
     const response: ApiResponse = { success: false, error: 'Name is required.' };
     res.status(400).json(response);
     return;
   }
-  const { room, player } = roomManager.createRoom(trimmedName);
+  const { room, player } = roomManager.createRoom(trimmedName, maxPlayers);
   const response: ApiResponse<{ room: RoomSnapshot; playerId: string }> = {
     success: true,
     data: {

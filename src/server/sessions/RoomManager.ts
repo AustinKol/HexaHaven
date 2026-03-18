@@ -8,7 +8,7 @@ export class RoomManager {
   private readonly rooms = new Map<string, Room>();
   private readonly gameStatesByRoomId = new Map<string, GameState>();
 
-  createRoom(hostName: string): { room: Room; player: RoomPlayer } {
+  createRoom(hostName: string, maxPlayers?: number): { room: Room; player: RoomPlayer } {
     const roomId = this.generateUniqueRoomId();
     const hostPlayer: RoomPlayer = {
       id: this.generatePlayerId(),
@@ -28,6 +28,7 @@ export class RoomManager {
       hostId: hostPlayer.id,
       players: [hostPlayer],
       status: 'waiting',
+      maxPlayers: maxPlayers ?? MAX_PLAYERS_PER_ROOM,
     };
     this.rooms.set(roomId, room);
     return { room, player: hostPlayer };
@@ -35,7 +36,7 @@ export class RoomManager {
 
   joinRoom(roomId: string, playerName: string): { room: Room; player: RoomPlayer } | null {
     const room = this.rooms.get(roomId);
-    if (!room || room.status !== 'waiting' || room.players.length >= MAX_PLAYERS_PER_ROOM) {
+    if (!room || room.status !== 'waiting' || room.players.length >= room.maxPlayers) {
       return null;
     }
     const usedAvatars = room.players.map((roomPlayer) => roomPlayer.avatar);
