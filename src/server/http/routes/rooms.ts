@@ -8,6 +8,7 @@ import { roomManager } from '../../sessions/roomManagerSingleton';
 
 interface HostRoomBody {
   name?: string;
+  maxPlayers?: number;
 }
 
 interface JoinRoomBody {
@@ -19,6 +20,13 @@ interface StartRoomBody {
   roomId?: string;
   playerId?: string;
 }
+
+interface LeaveRoomBody {
+  roomId?: string;
+  playerId?: string;
+  
+}
+
 
 const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#F7B801'] as const;
 
@@ -146,11 +154,13 @@ function buildRoomSnapshot(
       };
     }>;
     status: RoomStatus;
+    maxPlayers: number;
   },
 ): RoomSnapshot {
   return {
     roomId: room.id,
     status: room.status,
+    maxPlayers: room.maxPlayers,
     players: room.players.map((player) => ({
       id: player.id,
       name: player.name,
@@ -164,14 +174,14 @@ function buildRoomSnapshot(
 const roomsRouter = Router();
 
 roomsRouter.post(ApiRoutes.HostRoom, (req, res) => {
-  const { name } = (req.body ?? {}) as HostRoomBody;
+  const { name, maxPlayers } = (req.body ?? {}) as HostRoomBody;
   const trimmedName = name?.trim() ?? '';
   if (!trimmedName) {
     const response: ApiResponse = { success: false, error: 'Name is required.' };
     res.status(400).json(response);
     return;
   }
-  const { room, player } = roomManager.createRoom(trimmedName);
+  const { room, player } = roomManager.createRoom(trimmedName, maxPlayers);
   const response: ApiResponse<{ room: RoomSnapshot; playerId: string }> = {
     success: true,
     data: {
@@ -281,6 +291,35 @@ roomsRouter.get(`${ApiRoutes.RoomStatus}/:roomId`, (req, res) => {
     success: true,
     data: {
       room: buildRoomSnapshot(room),
+    },
+  };
+  res.json(response);
+});
+
+roomsRouter.post('/api/rooms/leave', (req, res) => {
+  const { roomId, playerId } = (req.body ?? {}) as LeaveRoomBody;
+  const normalizedRoomId = roomId?.trim().toUpperCase() ?? '';
+  const normalizedPlayerId = playerId?.trim() ?? '';
+
+  if (!normalizedRoomId || !normalizedPlayerId) {
+    const response: ApiResponse = { success: false, error: 'Room key and player id are required.' };
+    res.status(400).json(response);
+    return;
+  }
+
+  const updatedRoom = roomManager.leaveRoom(normalizedRoomId, normalizedPlayerId);
+
+  // Host left -> room deleted
+  if (!updatedRoom) {
+    const response: ApiResponse = { success: true };
+    res.json(response);
+    return;
+  }
+
+  const response: ApiResponse<{ room: RoomSnapshot }> = {
+    success: true,
+    data: {
+      room: buildRoomSnapshot(updatedRoom),
     },
   };
   res.json(response);

@@ -33,6 +33,20 @@ export class HostGameScreen {
     nameInput.placeholder = 'Your name';
     nameInput.maxLength = 24;
 
+    const sizeLabel = document.createElement('p');
+    sizeLabel.className = 'font-hexahaven-ui text-slate-300 mb-2';
+    sizeLabel.textContent = 'Select game size';
+
+    const sizeSelect = document.createElement('select');
+    sizeSelect.className = 'w-full px-4 py-3 rounded-lg bg-slate-800 border border-slate-600 text-white mb-3';
+
+    [2, 3, 4].forEach((size) => {
+      const option = document.createElement('option');
+      option.value = String(size);
+      option.textContent = `${size} Players`;
+      sizeSelect.appendChild(option);
+    });
+
     const errorText = document.createElement('p');
     errorText.className = 'font-hexahaven-ui text-sm text-red-300 min-h-5 mb-3';
 
@@ -62,7 +76,10 @@ export class HostGameScreen {
         const response = await apiFetch<ApiResponse<{ room: RoomSnapshot; playerId: string }>>(ApiRoutes.HostRoom, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name }),
+          body: JSON.stringify({
+            name,
+            maxPlayers: Number(sizeSelect.value),
+          }),
         });
         if (!response.success || !response.data) {
           throw new Error(response.error ?? 'Unable to create room.');
@@ -98,6 +115,8 @@ export class HostGameScreen {
     card.appendChild(title);
     card.appendChild(subtitle);
     card.appendChild(nameInput);
+    card.appendChild(sizeLabel);
+    card.appendChild(sizeSelect);
     card.appendChild(errorText);
     card.appendChild(startButton);
     card.appendChild(backButton);

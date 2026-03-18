@@ -54,6 +54,10 @@ export class WaitingRoomScreen {
     const playerList = document.createElement('div');
     playerList.className = 'flex flex-col gap-2 text-left mb-4';
 
+    const capacityText = document.createElement('p');
+    capacityText.className = 'font-hexahaven-ui text-slate-300 mb-3';
+    capacityText.textContent = '0/0';
+
     const startButton = document.createElement('button');
     startButton.className =
       'w-full mb-2 font-hexahaven-ui px-4 py-3 bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed';
@@ -64,15 +68,37 @@ export class WaitingRoomScreen {
     const leaveButton = document.createElement('button');
     leaveButton.className = 'w-full font-hexahaven-ui px-4 py-3 bg-slate-700 rounded-lg hover:bg-slate-600 transition-colors';
     leaveButton.textContent = 'Leave';
-    leaveButton.addEventListener('click', () => {
-      clearLobbySession();
-      this.navigate?.(ScreenId.MainMenu);
+    leaveButton.addEventListener('click', async () => {
+      try {
+        console.error('Leave button clicked', {
+          roomId: session.roomId,
+          playerId: session.playerId,
+          route: ApiRoutes.LeaveRoom,
+        });
+
+        const response = await apiFetch(ApiRoutes.LeaveRoom, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            roomId: session.roomId,
+            playerId: session.playerId,
+          }),
+        });
+
+        console.error('Leave response:', response);
+      } catch (error) {
+        console.error('Leave request failed:', error);
+      } finally {
+        clearLobbySession();
+        this.navigate?.(ScreenId.MainMenu);
+      }
     });
 
     card.appendChild(title);
     card.appendChild(keyLabel);
     card.appendChild(keyValue);
     card.appendChild(statusText);
+    card.appendChild(capacityText);
     card.appendChild(playerList);
     card.appendChild(startButton);
     card.appendChild(leaveButton);
@@ -159,6 +185,7 @@ export class WaitingRoomScreen {
           throw new Error(response.error ?? 'Room no longer available.');
         }
         const room = response.data.room;
+        capacityText.textContent = `${room.players.length}/${room.maxPlayers}`;
         renderPlayers(room);
         updateStatusText(room);
         updateStartButtonState(room);

@@ -9,6 +9,7 @@ export interface ApiResponse<T = unknown> {
 export interface RoomSnapshot {
   roomId: string;
   status: RoomStatus;
+  maxPlayers: number;
   players: Array<{
     id: string;
     name: string;
