@@ -106,6 +106,7 @@ function buildInitialGameStateFromRoom(room: Room): GameState {
           playerId: player.id,
           userId: player.id,
           displayName: player.name,
+          avatarUrl: player.avatar,
           color: PLAYER_COLORS[index % PLAYER_COLORS.length],
           isHost: player.id === room.hostId,
           resources: mapRoomResourcesToBundle(player.resources),

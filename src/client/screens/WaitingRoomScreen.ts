@@ -103,8 +103,14 @@ export class WaitingRoomScreen {
         row.className = 'font-hexahaven-ui px-3 py-2 rounded-md bg-slate-800 border border-slate-700 flex items-center gap-3';
         const isHost = player.isHost;
 
+        const avatar = document.createElement('img');
+        avatar.src = player.avatarUrl ?? '/avatar/avatar_1.png';
+        avatar.alt = `${player.displayName} avatar`;
+        avatar.className = 'h-12 w-12 bg-transparent object-cover';
+
         const playerText = document.createElement('span');
         playerText.textContent = `${index + 1}. ${player.displayName}${isHost ? ' (Host)' : ''}`;
+        row.appendChild(avatar);
         row.appendChild(playerText);
         playerList.appendChild(row);
       });

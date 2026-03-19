@@ -77,6 +77,7 @@ export interface PlayerState {
   playerId: string;
   userId: string;
   displayName: string;
+  avatarUrl: string | null;
   color: string;
   isHost: boolean;
   resources: ResourceBundle;

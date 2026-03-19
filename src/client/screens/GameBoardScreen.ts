@@ -38,6 +38,7 @@ export class GameBoardScreen {
   private unsubscribe: (() => void) | null = null;
   private liveGameState: GameState | null = null;
   private livePlayerId: string | null = null;
+  private fallbackLastDiceRoll = 'Not rolled yet';
 
   constructor() {
     this.backgroundMusic.loop = true;
@@ -228,17 +229,33 @@ export class GameBoardScreen {
       const card = document.createElement('div');
       card.className = 'rounded-xl border border-slate-500 bg-slate-900/85 px-3 py-3 text-white shadow-md';
 
+      const avatar = document.createElement('img');
+      avatar.src = player.avatarUrl ?? '/avatar/avatar_1.png';
+      avatar.alt = `${player.displayName} avatar`;
+      avatar.className = 'mx-auto mb-2 h-16 w-16 bg-transparent object-cover';
+
       const name = document.createElement('div');
       name.className = 'font-hexahaven-ui text-sm text-center truncate';
       name.textContent = player.displayName;
 
-      const meta = document.createElement('div');
-      meta.className = 'font-hexahaven-ui mt-2 text-[11px] text-slate-200 text-center';
-      meta.textContent = player.isHost ? 'Host' : 'Player';
+      const points = document.createElement('div');
+      points.className = 'font-hexahaven-ui mt-2 text-xs text-slate-200 text-center';
+      points.textContent = `Points: ${player.stats.publicVP ?? 0}`;
 
+      const resources = document.createElement('div');
+      resources.className = 'font-hexahaven-ui mt-2 text-xs leading-5 text-center';
+      resources.innerHTML = [
+        `<span style="color: #c28d5b;">Ember: ${player.resources.EMBER ?? 0}</span>`,
+        `<span style="color: #a3a3a3;">Stone: ${player.resources.STONE ?? 0}</span>`,
+        `<span style="color: #74b95e;">Bloom: ${player.resources.BLOOM ?? 0}</span>`,
+        `<span style="color: #fde047;">Gold: ${player.resources.GOLD ?? 0}</span>`,
+      ].join('<br>');
+
+      card.appendChild(avatar);
       card.appendChild(name);
-      card.appendChild(meta);
-      this.playerPanel.appendChild(card);
+      card.appendChild(points);
+      card.appendChild(resources);
+      this.playerPanel?.appendChild(card);
     });
   }
 
