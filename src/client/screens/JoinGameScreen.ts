@@ -1,7 +1,5 @@
 import { ScreenId } from '../../shared/constants/screenIds';
-import { ApiRoutes } from '../../shared/constants/apiRoutes';
-import type { ApiResponse, RoomSnapshot } from '../../shared/types/api';
-import { apiFetch } from '../networking/apiClient';
+import { joinGame } from '../networking/socketClient';
 import { setLobbySession } from '../state/lobbyState';
 import { createMusicToggleButton } from '../ui/musicToggleButton';
 
@@ -64,17 +62,14 @@ export class JoinGameScreen {
       joinButton.textContent = 'Joining...';
       errorText.textContent = '';
       try {
-        const response = await apiFetch<ApiResponse<{ room: RoomSnapshot; playerId: string }>>(ApiRoutes.JoinRoom, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, roomId }),
+        const ack = await joinGame({
+          joinCode: roomId,
+          displayName: name,
+          role: 'PLAYER',
         });
-        if (!response.success || !response.data) {
-          throw new Error(response.error ?? 'Unable to join room.');
-        }
         setLobbySession({
-          roomId: response.data.room.roomId,
-          playerId: response.data.playerId,
+          roomId: ack.gameState.roomCode,
+          playerId: ack.playerId,
           playerName: name,
           role: 'guest',
         });
