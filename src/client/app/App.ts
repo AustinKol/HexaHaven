@@ -5,6 +5,7 @@ import { GameBoardScreen } from '../screens/GameBoardScreen';
 import { HostGameScreen } from '../screens/HostGameScreen';
 import { JoinGameScreen } from '../screens/JoinGameScreen';
 import { MainMenuScreen } from '../screens/MainMenuScreen';
+import { RulesScreen } from '../screens/RulesScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { TestMapGenScreen } from '../screens/TestMapGenScreen';
 import { WaitingRoomScreen } from '../screens/WaitingRoomScreen';
@@ -19,7 +20,6 @@ interface AppScreen {
 export class App {
   private currentScreen: AppScreen | null = null;
   private readonly noMenuMusicScreens = new Set<ScreenId>([
-    ScreenIds.Settings,
     ScreenIds.TestMapGen,
     ScreenIds.GameBoard,
   ]);
@@ -37,6 +37,7 @@ export class App {
     registerScreen('waiting-room', new WaitingRoomScreen());
     registerScreen('game-board', new GameBoardScreen());
     registerScreen('settings', new SettingsScreen());
+    registerScreen('rules', new RulesScreen());
     registerScreen('test-map-gen', new TestMapGenScreen());
   }
 

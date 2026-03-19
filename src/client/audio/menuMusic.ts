@@ -1,13 +1,28 @@
+import { SETTINGS_CHANGED_EVENT } from '../settings/gameSettings';
+import { BASE_MENU_MUSIC_VOLUME, scaledMusicVolume } from './musicVolume';
+
 let menuMusic: HTMLAudioElement | null = null;
 let listenersBound = false;
 let shouldBePlayingForScreen = false;
 let isEnabledByUser = true;
+let settingsListenerBound = false;
+
+function syncMenuMusicGain(): void {
+  if (!menuMusic) {
+    return;
+  }
+  menuMusic.volume = scaledMusicVolume(BASE_MENU_MUSIC_VOLUME);
+}
 
 function getMenuMusic(): HTMLAudioElement {
   if (!menuMusic) {
     menuMusic = new Audio('/audio/menu-music.mp3');
     menuMusic.loop = true;
-    menuMusic.volume = 0.5;
+    syncMenuMusicGain();
+    if (!settingsListenerBound) {
+      settingsListenerBound = true;
+      window.addEventListener(SETTINGS_CHANGED_EVENT, syncMenuMusicGain);
+    }
   }
   return menuMusic;
 }
