@@ -20,7 +20,6 @@ interface AppScreen {
 export class App {
   private currentScreen: AppScreen | null = null;
   private readonly noMenuMusicScreens = new Set<ScreenId>([
-    ScreenIds.Settings,
     ScreenIds.TestMapGen,
     ScreenIds.GameBoard,
   ]);

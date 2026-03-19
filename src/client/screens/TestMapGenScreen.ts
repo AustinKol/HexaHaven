@@ -1,6 +1,8 @@
 import Phaser, { Scene } from 'phaser';
 import { createNoise2D } from 'simplex-noise';
 import { ScreenId } from '../../shared/constants/screenIds';
+import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledMusicVolume } from '../audio/musicVolume';
+import { SETTINGS_CHANGED_EVENT } from '../settings/gameSettings';
 import { clearLobbySession } from '../state/lobbyState';
 
 // --- Types ---
@@ -1137,6 +1139,9 @@ export class TestMapGenScreen {
     private readonly allowPointerRegenerate: boolean;
     private readonly backgroundMusic = new Audio('/audio/game-board-theme.mp3');
     private isMusicMuted = false;
+    private readonly onSettingsChanged = (): void => {
+        this.backgroundMusic.volume = scaledMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
+    };
 
     constructor(options?: {
         showExitButton?: boolean;
@@ -1151,7 +1156,7 @@ export class TestMapGenScreen {
         this.showRegenerateButton = options?.showRegenerateButton ?? true;
         this.allowPointerRegenerate = options?.allowPointerRegenerate ?? true;
         this.backgroundMusic.loop = true;
-        this.backgroundMusic.volume = 0.35;
+        this.onSettingsChanged();
     }
 
     private ensureButtonFontRegistered(): void {
@@ -1169,6 +1174,7 @@ export class TestMapGenScreen {
     }
 
     render(parentElement: HTMLElement, _onComplete?: () => void, navigate?: (screenId: string) => void): void {
+        window.addEventListener(SETTINGS_CHANGED_EVENT, this.onSettingsChanged);
         if (this.enableBackgroundMusic) {
             this.playBackgroundMusic();
         }
@@ -1315,6 +1321,7 @@ export class TestMapGenScreen {
     }
 
     destroy(): void {
+        window.removeEventListener(SETTINGS_CHANGED_EVENT, this.onSettingsChanged);
         this.stopBackgroundMusic();
         if (this.game) {
             this.game.destroy(true);

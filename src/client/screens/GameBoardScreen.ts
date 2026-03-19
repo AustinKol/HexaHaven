@@ -1,3 +1,5 @@
+import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledMusicVolume } from '../audio/musicVolume';
+import { SETTINGS_CHANGED_EVENT } from '../settings/gameSettings';
 import { ScreenId } from '../../shared/constants/screenIds';
 import { ApiRoutes } from '../../shared/constants/apiRoutes';
 import type { ApiResponse, RoomSnapshot } from '../../shared/types/api';
@@ -41,10 +43,13 @@ export class GameBoardScreen {
   private fallbackCurrentPlayerIndex = 0;
   private fallbackPhase: 'ROLL' | 'ACTION' = 'ROLL';
   private fallbackLastDiceRoll = 'Not rolled yet';
+  private readonly onSettingsChanged = (): void => {
+    this.backgroundMusic.volume = scaledMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
+  };
 
   constructor() {
     this.backgroundMusic.loop = true;
-    this.backgroundMusic.volume = 0.35;
+    this.onSettingsChanged();
   }
 
   setTurnHudBindings(bindings: GameBoardTurnHudBindings | null): void {
@@ -53,6 +58,7 @@ export class GameBoardScreen {
   }
 
   render(parentElement: HTMLElement, onComplete?: () => void, navigate?: (screenId: ScreenId) => void): void {
+    window.addEventListener(SETTINGS_CHANGED_EVENT, this.onSettingsChanged);
     this.playBackgroundMusic();
     const session = getLobbySession();
     const roomId = session?.roomId ?? null;
@@ -427,6 +433,7 @@ export class GameBoardScreen {
   }
 
   destroy(): void {
+    window.removeEventListener(SETTINGS_CHANGED_EVENT, this.onSettingsChanged);
     this.stopBackgroundMusic();
     if (this.playersPollTimer !== null) {
       window.clearTimeout(this.playersPollTimer);

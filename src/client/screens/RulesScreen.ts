@@ -1,4 +1,5 @@
 import { ScreenId } from '../../shared/constants/screenIds';
+import { createMusicToggleButton } from '../ui/musicToggleButton';
 
 const RULES_SECTIONS = [
   {
@@ -106,6 +107,7 @@ export class RulesScreen {
     panel.appendChild(footer);
 
     this.container.appendChild(panel);
+    this.container.appendChild(createMusicToggleButton());
     parentElement.appendChild(this.container);
   }
 

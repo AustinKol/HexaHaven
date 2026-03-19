@@ -1,5 +1,6 @@
 import { ScreenId } from '../../shared/constants/screenIds';
 import { loadSettings, saveSettings } from '../settings/gameSettings';
+import { createMusicToggleButton } from '../ui/musicToggleButton';
 import type { GameSettings, TextSpeed } from '../settings/gameSettings';
 
 const TEXT_SPEEDS: TextSpeed[] = ['Slow', 'Medium', 'Fast'];
@@ -63,6 +64,7 @@ export class SettingsScreen {
     panel.appendChild(footer);
 
     this.container.appendChild(panel);
+    this.container.appendChild(createMusicToggleButton());
     parentElement.appendChild(this.container);
   }
 
