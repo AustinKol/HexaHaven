@@ -20,12 +20,10 @@ export class SettingsScreen {
     this.settings = loadSettings();
     parentElement.innerHTML = '';
 
-    // ── Root ───────────────────────────────────────────────────────────
     this.container = document.createElement('div');
     this.container.className =
       'relative flex items-center justify-center w-full h-full bg-gradient-to-b from-slate-900 to-slate-950';
 
-    // ── Panel ──────────────────────────────────────────────────────────
     const panel = document.createElement('div');
     panel.className =
       'relative flex flex-col items-center bg-white rounded-2xl shadow-2xl px-16 py-12 min-w-[480px]';
@@ -36,7 +34,6 @@ export class SettingsScreen {
     title.textContent = 'Settings';
     panel.appendChild(title);
 
-    // ── Rows ────────────────────────────────────────────────────────────
     const rows = document.createElement('div');
     rows.className = 'flex flex-col gap-6 w-full';
 
@@ -51,7 +48,6 @@ export class SettingsScreen {
 
     panel.appendChild(rows);
 
-    // ── Go back ────────────────────────────────────────────────────────
     const footer = document.createElement('div');
     footer.className = 'flex justify-end w-full mt-10';
 
@@ -70,7 +66,6 @@ export class SettingsScreen {
     parentElement.appendChild(this.container);
   }
 
-  // ── Row builders ──────────────────────────────────────────────────────
 
   private createVolumeRow(): HTMLElement {
     const row = this.createRow('Volume:');
@@ -135,7 +130,6 @@ export class SettingsScreen {
     return row;
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────
 
   private createRow(labelText: string): HTMLElement {
     const row = document.createElement('div');

@@ -3,7 +3,7 @@ const SETTINGS_KEY = 'hexahaven_settings';
 export type TextSpeed = 'Slow' | 'Medium' | 'Fast';
 
 export interface GameSettings {
-  masterVolume: number; // 0–100, increments of 5
+  masterVolume: number; 
   sfxEnabled: boolean;
   textSpeed: TextSpeed;
 }
