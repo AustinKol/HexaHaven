@@ -1,8 +1,7 @@
 import { ScreenId } from '../../shared/constants/screenIds';
-import { ApiRoutes } from '../../shared/constants/apiRoutes';
-import type { ApiResponse, RoomSnapshot } from '../../shared/types/api';
-import type { DiceRoll, GamePhase } from '../../shared/types/domain';
-import { apiFetch } from '../networking/apiClient';
+import type { DiceRoll, GamePhase, GameState } from '../../shared/types/domain';
+import { connectSocket, endTurn, rollDice } from '../networking/socketClient';
+import { subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
 import { TestMapGenScreen } from './TestMapGenScreen';
 
@@ -34,13 +33,11 @@ export class GameBoardScreen {
   private rollDiceButton: HTMLButtonElement | null = null;
   private endTurnButton: HTMLButtonElement | null = null;
   private buttonContainer: HTMLElement | null = null;
-  private playersPollTimer: number | null = null;
   private isMusicMuted = false;
   private turnHudBindings: GameBoardTurnHudBindings | null = null;
-  private fallbackPlayerOrder: string[] = [];
-  private fallbackCurrentPlayerIndex = 0;
-  private fallbackPhase: 'ROLL' | 'ACTION' = 'ROLL';
-  private fallbackLastDiceRoll = 'Not rolled yet';
+  private unsubscribe: (() => void) | null = null;
+  private liveGameState: GameState | null = null;
+  private livePlayerId: string | null = null;
 
   constructor() {
     this.backgroundMusic.loop = true;
@@ -56,6 +53,7 @@ export class GameBoardScreen {
     this.playBackgroundMusic();
     const session = getLobbySession();
     const roomId = session?.roomId ?? null;
+    this.livePlayerId = session?.playerId ?? null;
     this.mapScreen = new TestMapGenScreen({
       showExitButton: false,
       enableBackgroundMusic: false,
@@ -76,7 +74,13 @@ export class GameBoardScreen {
     this.mountPlayerPanel(this.buttonContainer);
     this.mountTurnHud(this.buttonContainer);
     if (roomId) {
-      void this.pollPlayers(roomId);
+      connectSocket({ gameId: roomId, playerId: session?.playerId });
+      this.unsubscribe = subscribeClientState((state) => {
+        this.liveGameState = state.gameState;
+        this.livePlayerId = state.playerId ?? this.livePlayerId;
+        this.updateTurnHud();
+        this.renderPlayerCardsFromGameState();
+      });
     }
 
     if (!navigate) {
@@ -209,109 +213,55 @@ export class GameBoardScreen {
     this.updateTurnHud();
   }
 
-  private async pollPlayers(roomId: string): Promise<void> {
-    try {
-      const response = await apiFetch<ApiResponse<{ room: RoomSnapshot }>>(`${ApiRoutes.RoomStatus}/${roomId}`);
-      if (!response.success || !response.data) {
-        throw new Error(response.error ?? 'Unable to load players.');
-      }
-      this.renderPlayerCards(response.data.room);
-    } catch {
-      this.renderPlayerCards(null);
-    }
-
-    if (this.playerPanel) {
-      this.playersPollTimer = window.setTimeout(() => {
-        void this.pollPlayers(roomId);
-      }, 1500);
-    }
-  }
-
-  private renderPlayerCards(room: RoomSnapshot | null): void {
-    if (!this.playerPanel) {
+  private renderPlayerCardsFromGameState(): void {
+    const gameState = this.liveGameState;
+    if (!this.playerPanel || !gameState) {
       return;
     }
     this.playerPanel.innerHTML = '';
-    this.syncFallbackPlayers(room);
-    if (!room || room.players.length === 0) {
-      const placeholder = document.createElement('div');
-      placeholder.className =
-        'font-hexahaven-ui text-xs text-slate-200 rounded-lg border border-slate-600 bg-slate-900/85 px-3 py-2';
-      placeholder.textContent = 'Players unavailable';
-      this.playerPanel.appendChild(placeholder);
-      this.updateTurnHud();
-      return;
-    }
+    gameState.playerOrder.forEach((playerId) => {
+      const player = gameState.playersById[playerId];
+      if (!player) {
+        return;
+      }
 
-    room.players.forEach((player) => {
       const card = document.createElement('div');
       card.className = 'rounded-xl border border-slate-500 bg-slate-900/85 px-3 py-3 text-white shadow-md';
 
-      const avatar = document.createElement('img');
-      avatar.src = player.avatar;
-      avatar.alt = `${player.name} avatar`;
-      avatar.className = 'mx-auto mb-2 h-16 w-16 bg-transparent object-cover';
-
       const name = document.createElement('div');
       name.className = 'font-hexahaven-ui text-sm text-center truncate';
-      name.textContent = player.name;
+      name.textContent = player.displayName;
 
-      const points = document.createElement('div');
-      points.className = 'font-hexahaven-ui mt-2 text-xs text-slate-200 text-center';
-      points.textContent = `Points: ${player.points}`;
+      const meta = document.createElement('div');
+      meta.className = 'font-hexahaven-ui mt-2 text-[11px] text-slate-200 text-center';
+      meta.textContent = player.isHost ? 'Host' : 'Player';
 
-      const resources = document.createElement('div');
-      resources.className = 'font-hexahaven-ui mt-2 text-xs leading-5';
-      resources.innerHTML = [
-        `<span style="color: #c28d5b;">Ember: ${player.resources?.ember ?? 0}</span>`,
-        `<span style="color: #fde047;">Gold: ${player.resources?.gold ?? 0}</span>`,
-        `<span style="color: #a3a3a3;">Stone: ${player.resources?.stone ?? 0}</span>`,
-        `<span style="color: #74b95e;">Bloom: ${player.resources?.bloom ?? 0}</span>`,
-        `<span style="color: #ffffff;">Crystal: ${player.resources?.crystal ?? 0}</span>`,
-      ].join('<br>');
-
-      card.appendChild(avatar);
       card.appendChild(name);
-      card.appendChild(points);
-      card.appendChild(resources);
-      this.playerPanel?.appendChild(card);
+      card.appendChild(meta);
+      this.playerPanel.appendChild(card);
     });
-
-    this.updateTurnHud();
-  }
-
-  private syncFallbackPlayers(room: RoomSnapshot | null): void {
-    if (!room || room.players.length === 0) {
-      this.fallbackPlayerOrder = [];
-      this.fallbackCurrentPlayerIndex = 0;
-      return;
-    }
-
-    const nextOrder = room.players.map((player) => player.name || player.id);
-    const previousCurrent = this.fallbackPlayerOrder[this.fallbackCurrentPlayerIndex] ?? null;
-    this.fallbackPlayerOrder = nextOrder;
-
-    if (!previousCurrent) {
-      this.fallbackCurrentPlayerIndex = 0;
-      return;
-    }
-
-    const updatedIndex = nextOrder.indexOf(previousCurrent);
-    this.fallbackCurrentPlayerIndex = updatedIndex >= 0 ? updatedIndex : 0;
   }
 
   private updateTurnHud(): void {
+    const gameState = this.liveGameState;
     const liveValues = this.turnHudBindings?.getValues?.() ?? null;
-    const currentPlayer = liveValues?.currentPlayer ?? this.fallbackPlayerOrder[this.fallbackCurrentPlayerIndex] ?? 'Waiting for player state';
-    const currentPhase: GamePhase | 'ROLL' | 'ACTION' = liveValues?.currentPhase ?? this.fallbackPhase;
-    const lastDiceRollText = this.formatLastDiceRollDisplay(liveValues?.lastDiceRoll);
 
+    const activePlayerId = gameState?.turn.currentPlayerId ?? null;
+    const activePlayerName = activePlayerId && gameState?.playersById[activePlayerId]
+      ? gameState.playersById[activePlayerId].displayName
+      : null;
+
+    const currentPlayer = liveValues?.currentPlayer ?? activePlayerName ?? activePlayerId ?? 'Waiting';
+    const currentPhase: GamePhase | null = liveValues?.currentPhase ?? gameState?.turn.phase ?? null;
+    const lastDiceRollText = this.formatLastDiceRollDisplay(liveValues?.lastDiceRoll ?? gameState?.turn.lastDiceRoll);
+
+    const isActivePlayer = Boolean(activePlayerId && this.livePlayerId && activePlayerId === this.livePlayerId);
     const canRoll = typeof liveValues?.canRollDice === 'boolean'
       ? liveValues.canRollDice
-      : currentPhase === 'ROLL';
+      : Boolean(isActivePlayer && currentPhase === 'ROLL' && (gameState?.turn.lastDiceRoll ?? null) === null);
     const canEnd = typeof liveValues?.canEndTurn === 'boolean'
       ? liveValues.canEndTurn
-      : currentPhase === 'ACTION';
+      : Boolean(isActivePlayer && currentPhase === 'ACTION' && (gameState?.turn.lastDiceRoll ?? null) !== null);
 
     if (this.currentPlayerValue) {
       this.currentPlayerValue.textContent = currentPlayer;
@@ -357,8 +307,10 @@ export class GameBoardScreen {
       this.updateTurnHud();
       return;
     }
-
-    this.handleDemoRollDice();
+    const roomId = getLobbySession()?.roomId ?? null;
+    if (roomId) {
+      void rollDice(roomId);
+    }
   }
 
   private handleEndTurnClick(): void {
@@ -367,33 +319,10 @@ export class GameBoardScreen {
       this.updateTurnHud();
       return;
     }
-
-    this.handleDemoEndTurn();
-  }
-
-  private handleDemoRollDice(): void {
-    if (this.fallbackPhase !== 'ROLL') {
-      return;
+    const roomId = getLobbySession()?.roomId ?? null;
+    if (roomId) {
+      void endTurn(roomId);
     }
-
-    const d1 = Math.floor(Math.random() * 6) + 1;
-    const d2 = Math.floor(Math.random() * 6) + 1;
-    this.fallbackLastDiceRoll = `${d1} + ${d2} = ${d1 + d2}`;
-    this.fallbackPhase = 'ACTION';
-    this.updateTurnHud();
-  }
-
-  private handleDemoEndTurn(): void {
-    if (this.fallbackPhase !== 'ACTION') {
-      return;
-    }
-
-    if (this.fallbackPlayerOrder.length > 0) {
-      this.fallbackCurrentPlayerIndex = (this.fallbackCurrentPlayerIndex + 1) % this.fallbackPlayerOrder.length;
-    }
-    this.fallbackLastDiceRoll = 'Not rolled yet';
-    this.fallbackPhase = 'ROLL';
-    this.updateTurnHud();
   }
 
   private playBackgroundMusic(): void {
@@ -428,9 +357,9 @@ export class GameBoardScreen {
 
   destroy(): void {
     this.stopBackgroundMusic();
-    if (this.playersPollTimer !== null) {
-      window.clearTimeout(this.playersPollTimer);
-      this.playersPollTimer = null;
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
     }
     if (this.exitButton) {
       this.exitButton.remove();
@@ -456,5 +385,7 @@ export class GameBoardScreen {
     this.buttonContainer = null;
     this.mapScreen?.destroy();
     this.mapScreen = null;
+    this.liveGameState = null;
+    this.livePlayerId = null;
   }
 }

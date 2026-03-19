@@ -1,7 +1,6 @@
 import { ScreenId } from '../../shared/constants/screenIds';
-import { ApiRoutes } from '../../shared/constants/apiRoutes';
-import type { ApiResponse, RoomSnapshot } from '../../shared/types/api';
-import { apiFetch } from '../networking/apiClient';
+import type { ResourceBundle } from '../../shared/types/domain';
+import { createGame } from '../networking/socketClient';
 import { setLobbySession } from '../state/lobbyState';
 import { createMusicToggleButton } from '../ui/musicToggleButton';
 
@@ -73,20 +72,24 @@ export class HostGameScreen {
       errorText.textContent = '';
 
       try {
-        const response = await apiFetch<ApiResponse<{ room: RoomSnapshot; playerId: string }>>(ApiRoutes.HostRoom, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name,
-            maxPlayers: Number(sizeSelect.value),
-          }),
+        const startingResources: ResourceBundle = { CRYSTAL: 0, STONE: 0, BLOOM: 0, EMBER: 0, GOLD: 0 };
+        const ack = await createGame({
+          displayName: name,
+          config: {
+            playerCount: Number(sizeSelect.value),
+            goalCount: 0,
+            winRule: 'ALL_GOALS_COMPLETE',
+            mapSeed: 0,
+            mapSize: 'small',
+            timerEnabled: false,
+            turnTimeSec: null,
+            allowReroll: false,
+            startingResources,
+          },
         });
-        if (!response.success || !response.data) {
-          throw new Error(response.error ?? 'Unable to create room.');
-        }
         setLobbySession({
-          roomId: response.data.room.roomId,
-          playerId: response.data.playerId,
+          roomId: ack.gameState.roomCode,
+          playerId: ack.playerId,
           playerName: name,
           role: 'host',
         });
