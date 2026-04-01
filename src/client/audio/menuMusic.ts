@@ -5,7 +5,6 @@ let menuMusic: HTMLAudioElement | null = null;
 let listenersBound = false;
 let shouldBePlayingForScreen = false;
 let isEnabledByUser = true;
-let settingsListenerBound = false;
 
 function syncMenuMusicGain(): void {
   if (!menuMusic) {
@@ -19,13 +18,17 @@ function getMenuMusic(): HTMLAudioElement {
     menuMusic = new Audio('/audio/menu-music.mp3');
     menuMusic.loop = true;
     syncMenuMusicGain();
-    if (!settingsListenerBound) {
-      settingsListenerBound = true;
-      window.addEventListener(SETTINGS_CHANGED_EVENT, syncMenuMusicGain);
-    }
   }
   return menuMusic;
 }
+
+/** Ensure menu audio exists and its gain matches saved master volume (call after changing volume in settings). */
+export function refreshMenuMusicVolume(): void {
+  getMenuMusic();
+  syncMenuMusicGain();
+}
+
+window.addEventListener(SETTINGS_CHANGED_EVENT, syncMenuMusicGain);
 
 function tryPlay(): void {
   if (!shouldBePlayingForScreen || !isEnabledByUser) {

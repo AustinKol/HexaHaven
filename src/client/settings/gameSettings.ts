@@ -1,27 +1,27 @@
 const SETTINGS_KEY = 'hexahaven_settings';
 
-/** Dispatched on `window` whenever settings are persisted (volume, SFX, text speed). */
+/** Dispatched on `window` whenever settings are persisted (volume, SFX). */
 export const SETTINGS_CHANGED_EVENT = 'hexahaven-settings-changed';
 
-export type TextSpeed = 'Slow' | 'Medium' | 'Fast';
-
 export interface GameSettings {
-  masterVolume: number; 
+  masterVolume: number;
   sfxEnabled: boolean;
-  textSpeed: TextSpeed;
 }
 
 const DEFAULTS: GameSettings = {
   masterVolume: 80,
   sfxEnabled: true,
-  textSpeed: 'Medium',
 };
 
 export function loadSettings(): GameSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return { ...DEFAULTS };
-    return { ...DEFAULTS, ...JSON.parse(raw) };
+    const merged = { ...DEFAULTS, ...JSON.parse(raw) };
+    return {
+      masterVolume: typeof merged.masterVolume === 'number' ? merged.masterVolume : DEFAULTS.masterVolume,
+      sfxEnabled: typeof merged.sfxEnabled === 'boolean' ? merged.sfxEnabled : DEFAULTS.sfxEnabled,
+    };
   } catch {
     return { ...DEFAULTS };
   }
