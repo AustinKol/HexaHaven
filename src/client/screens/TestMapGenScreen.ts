@@ -15,6 +15,8 @@ interface MapGenSceneOptions {
     allowPointerRegenerate?: boolean;
     /** Smaller hexes + auto-fit camera so the full map fits in view (e.g. game board). */
     compactFit?: boolean;
+    /** When set and `allowPointerRegenerate` is false, any map click invokes this (e.g. confirm build placement). */
+    onMapPointerDown?: () => void;
 }
 
 // Rich color palettes per biome (sampled by noise for variation)
@@ -750,6 +752,7 @@ export class MapGenTest extends Scene {
     private readonly sandBorderTextureKeys = ['beach-corner-1', 'beach-corner-2', 'beach-corner-3'] as const;
     private readonly mapSeed: number | null;
     private readonly allowPointerRegenerate: boolean;
+    private readonly onMapPointerDown?: () => void;
     private rng: () => number = Math.random;
 
     constructor(options?: MapGenSceneOptions) {
@@ -757,6 +760,7 @@ export class MapGenTest extends Scene {
         this.mapSeed = normalizeSeed(options?.mapSeed);
         this.allowPointerRegenerate = options?.allowPointerRegenerate ?? true;
         this.compactFit = options?.compactFit ?? false;
+        this.onMapPointerDown = options?.onMapPointerDown;
         if (this.compactFit) {
             this.hexSize = 34;
             this.mapZoom = 1;
@@ -796,6 +800,9 @@ export class MapGenTest extends Scene {
 
         if (this.allowPointerRegenerate) {
             this.input.on('pointerdown', () => this.regenerateMap());
+        } else if (this.onMapPointerDown) {
+            const onMap = this.onMapPointerDown;
+            this.input.on('pointerdown', () => onMap());
         }
     }
 
@@ -1201,6 +1208,7 @@ export class TestMapGenScreen {
     /** Extra pixels to raise the map (gap above bottom bar / UI). ~20px ≈ 0.5cm at 96dpi. */
     private readonly mapLiftPx: number;
     private readonly compactFit: boolean;
+    private readonly onMapPointerDown?: () => void;
     private onWindowResize: (() => void) | null = null;
     private readonly backgroundMusic = new Audio('/audio/game-board-theme.mp3');
     private isMusicMuted = false;
@@ -1218,6 +1226,7 @@ export class TestMapGenScreen {
         /** Shifts the map upward by this many pixels (adds to bottom inset). */
         mapLiftPx?: number;
         compactFit?: boolean;
+        onMapPointerDown?: () => void;
     }) {
         this.showExitButton = options?.showExitButton ?? true;
         this.enableBackgroundMusic = options?.enableBackgroundMusic ?? true;
@@ -1227,6 +1236,7 @@ export class TestMapGenScreen {
         this.reservedBottomPx = Math.max(0, options?.reservedBottomPx ?? 0);
         this.mapLiftPx = Math.max(0, options?.mapLiftPx ?? 0);
         this.compactFit = options?.compactFit ?? false;
+        this.onMapPointerDown = options?.onMapPointerDown;
         this.backgroundMusic.loop = true;
         this.onSettingsChanged();
     }
@@ -1364,6 +1374,7 @@ export class TestMapGenScreen {
                 mapSeed: this.mapSeed,
                 allowPointerRegenerate: this.allowPointerRegenerate,
                 compactFit: this.compactFit,
+                onMapPointerDown: this.onMapPointerDown,
             })],
             scale: {
                 mode: Phaser.Scale.FIT,
