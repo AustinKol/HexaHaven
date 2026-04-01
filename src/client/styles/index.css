@@ -6,6 +6,12 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: "Wonderful Christmas";
+  src: url("/fonts/WonderfulChristmas.otf") format("opentype");
+  font-display: swap;
+}
+
 .font-hexahaven-title {
   font-family: "04B_30__", monospace;
   letter-spacing: 0.08em;
@@ -14,6 +20,11 @@
 .font-hexahaven-ui {
   font-family: "04B_30__", monospace;
   letter-spacing: 0.04em;
+}
+
+.font-hexahaven-rules-body {
+  font-family: "Wonderful Christmas", ui-serif, Georgia, serif;
+  letter-spacing: 0.02em;
 }
 
 body {
