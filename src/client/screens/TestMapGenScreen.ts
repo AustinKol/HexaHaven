@@ -13,6 +13,8 @@ type MapSize = 'small' | 'medium' | 'large';
 interface MapGenSceneOptions {
     mapSeed?: string | number;
     allowPointerRegenerate?: boolean;
+    /** Smaller hexes + auto-fit camera so the full map fits in view (e.g. game board). */
+    compactFit?: boolean;
 }
 
 // Rich color palettes per biome (sampled by noise for variation)
@@ -733,13 +735,17 @@ const BIOME_DETAIL: Record<BiomeType, (g: Phaser.GameObjects.Graphics, cx: numbe
     },
 };
 
+/** Multiply compact-fit zoom so the map can sit larger than the strict fit (1.5 = 50% bigger on screen). */
+const COMPACT_FIT_ZOOM_MULTIPLIER = 1.62;
+
 export class MapGenTest extends Scene {
     private terrain!: TerrainGenerator;
     private hexes: Hex[] = [];
     private hexMap = new Map<string, Hex>();
     private mapRadius = 5;
     private hexSize = 48;
-    private readonly mapZoom = 1.5;
+    private mapZoom = 1.5;
+    private readonly compactFit: boolean;
     private canvasKey = 'terrainCanvas';
     private readonly sandBorderTextureKeys = ['beach-corner-1', 'beach-corner-2', 'beach-corner-3'] as const;
     private readonly mapSeed: number | null;
@@ -750,6 +756,11 @@ export class MapGenTest extends Scene {
         super('MapGenTest');
         this.mapSeed = normalizeSeed(options?.mapSeed);
         this.allowPointerRegenerate = options?.allowPointerRegenerate ?? true;
+        this.compactFit = options?.compactFit ?? false;
+        if (this.compactFit) {
+            this.hexSize = 34;
+            this.mapZoom = 1;
+        }
     }
 
     private resetRandomSource(): void {
@@ -774,13 +785,65 @@ export class MapGenTest extends Scene {
     create() {
         this.regenerateMap();
 
-        this.cameras.main.centerOn(0, 0);
-        this.cameras.main.zoom = this.mapZoom;
         this.cameras.main.setBackgroundColor('rgba(0,0,0,0)');
+
+        if (this.compactFit) {
+            this.scale.on('resize', () => this.fitCameraToVisibleMap());
+        } else {
+            this.cameras.main.centerOn(0, 0);
+            this.cameras.main.setZoom(this.mapZoom);
+        }
 
         if (this.allowPointerRegenerate) {
             this.input.on('pointerdown', () => this.regenerateMap());
         }
+    }
+
+    private computeHexMapBounds(): { minX: number; maxX: number; minY: number; maxY: number } {
+        const sz = this.hexSize;
+        const pad = sz * 2;
+        const verticalPad = sz * 0.8;
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const hex of this.hexes) {
+            const p = hexToPixel(hex.q, hex.r, sz);
+            minX = Math.min(minX, p.x - sz);
+            maxX = Math.max(maxX, p.x + sz);
+            minY = Math.min(minY, p.y - sz);
+            maxY = Math.max(maxY, p.y + sz);
+        }
+        minX -= pad;
+        minY -= pad + verticalPad;
+        maxX += pad;
+        maxY += pad + verticalPad;
+        return { minX, maxX, minY, maxY };
+    }
+
+    fitCameraToVisibleMap(): void {
+        if (!this.compactFit || this.hexes.length === 0) {
+            return;
+        }
+        const { minX, maxX, minY, maxY } = this.computeHexMapBounds();
+        const worldW = maxX - minX;
+        const worldH = maxY - minY;
+        if (worldW < 1 || worldH < 1) {
+            return;
+        }
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+        const cam = this.cameras.main;
+        const viewW = cam.width;
+        const viewH = cam.height;
+        if (viewW < 1 || viewH < 1) {
+            return;
+        }
+        const margin = 0.94;
+        const zoom =
+            Math.min(viewW / worldW, viewH / worldH) * margin * COMPACT_FIT_ZOOM_MULTIPLIER;
+        cam.centerOn(cx, cy);
+        cam.setZoom(zoom);
     }
 
     private generateMap(size: MapSize) {
@@ -902,15 +965,7 @@ export class MapGenTest extends Scene {
         }
 
         const sz = this.hexSize;
-        const pad = sz * 2;
-        const verticalPad = sz * 0.8;
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        for (const hex of this.hexes) {
-            const p = hexToPixel(hex.q, hex.r, sz);
-            minX = Math.min(minX, p.x - sz); maxX = Math.max(maxX, p.x + sz);
-            minY = Math.min(minY, p.y - sz); maxY = Math.max(maxY, p.y + sz);
-        }
-        minX -= pad; minY -= (pad + verticalPad); maxX += pad; maxY += (pad + verticalPad);
+        const { minX, maxX, minY, maxY } = this.computeHexMapBounds();
         const w = Math.ceil(maxX - minX);
         const h = Math.ceil(maxY - minY);
 
@@ -1002,6 +1057,10 @@ export class MapGenTest extends Scene {
                 align: 'center',
                 resolution: 10
             }).setOrigin(0.5).setDepth(4);
+        }
+
+        if (this.compactFit) {
+            this.fitCameraToVisibleMap();
         }
     }
 
@@ -1137,6 +1196,12 @@ export class TestMapGenScreen {
     private readonly mapSeed?: string | number;
     private readonly showRegenerateButton: boolean;
     private readonly allowPointerRegenerate: boolean;
+    /** Pixels reserved at bottom for overlays (game board resource bar). Map renders above this. */
+    private readonly reservedBottomPx: number;
+    /** Extra pixels to raise the map (gap above bottom bar / UI). ~20px ≈ 0.5cm at 96dpi. */
+    private readonly mapLiftPx: number;
+    private readonly compactFit: boolean;
+    private onWindowResize: (() => void) | null = null;
     private readonly backgroundMusic = new Audio('/audio/game-board-theme.mp3');
     private isMusicMuted = false;
     private readonly onSettingsChanged = (): void => {
@@ -1149,12 +1214,19 @@ export class TestMapGenScreen {
         mapSeed?: string | number;
         showRegenerateButton?: boolean;
         allowPointerRegenerate?: boolean;
+        reservedBottomPx?: number;
+        /** Shifts the map upward by this many pixels (adds to bottom inset). */
+        mapLiftPx?: number;
+        compactFit?: boolean;
     }) {
         this.showExitButton = options?.showExitButton ?? true;
         this.enableBackgroundMusic = options?.enableBackgroundMusic ?? true;
         this.mapSeed = options?.mapSeed;
         this.showRegenerateButton = options?.showRegenerateButton ?? true;
         this.allowPointerRegenerate = options?.allowPointerRegenerate ?? true;
+        this.reservedBottomPx = Math.max(0, options?.reservedBottomPx ?? 0);
+        this.mapLiftPx = Math.max(0, options?.mapLiftPx ?? 0);
+        this.compactFit = options?.compactFit ?? false;
         this.backgroundMusic.loop = true;
         this.onSettingsChanged();
     }
@@ -1192,12 +1264,20 @@ export class TestMapGenScreen {
         this.container.style.backgroundRepeat = 'no-repeat';
         parentElement.appendChild(this.container);
 
-        // Create Phaser mount over background
+        // Create Phaser mount over background (optionally leave room at bottom for UI overlays)
         const phaserMount = document.createElement('div');
         phaserMount.id = 'phaser-container';
         phaserMount.style.position = 'absolute';
-        phaserMount.style.inset = '0';
+        phaserMount.style.left = '0';
+        phaserMount.style.right = '0';
+        phaserMount.style.top = '0';
         phaserMount.style.zIndex = '1';
+        const mapBottomInsetPx = this.reservedBottomPx + this.mapLiftPx;
+        if (mapBottomInsetPx > 0) {
+            phaserMount.style.bottom = `${mapBottomInsetPx}px`;
+        } else {
+            phaserMount.style.bottom = '0';
+        }
         this.container.appendChild(phaserMount);
 
         if (this.showRegenerateButton) {
@@ -1270,16 +1350,20 @@ export class TestMapGenScreen {
             this.container.appendChild(this.exitButton);
         }
 
+        const gameWidth = window.innerWidth;
+        const gameHeight = Math.max(200, window.innerHeight - mapBottomInsetPx);
+
         // Initialize Phaser game
         const config: Phaser.Types.Core.GameConfig = {
             type: Phaser.AUTO,
             parent: 'phaser-container',
-            width: window.innerWidth,
-            height: window.innerHeight,
+            width: gameWidth,
+            height: gameHeight,
             transparent: true,
             scene: [new MapGenTest({
                 mapSeed: this.mapSeed,
                 allowPointerRegenerate: this.allowPointerRegenerate,
+                compactFit: this.compactFit,
             })],
             scale: {
                 mode: Phaser.Scale.FIT,
@@ -1288,6 +1372,21 @@ export class TestMapGenScreen {
         };
 
         this.game = new Phaser.Game(config);
+
+        this.onWindowResize = () => {
+            if (!this.game) {
+                return;
+            }
+            const w = window.innerWidth;
+            const inset = this.reservedBottomPx + this.mapLiftPx;
+            const h = Math.max(200, window.innerHeight - inset);
+            this.game.scale.resize(w, h);
+            if (this.compactFit) {
+                const scene = this.game.scene.getScene('MapGenTest') as MapGenTest | undefined;
+                scene?.fitCameraToVisibleMap();
+            }
+        };
+        window.addEventListener('resize', this.onWindowResize);
     }
 
     private playBackgroundMusic(): void {
@@ -1322,6 +1421,10 @@ export class TestMapGenScreen {
 
     destroy(): void {
         window.removeEventListener(SETTINGS_CHANGED_EVENT, this.onSettingsChanged);
+        if (this.onWindowResize) {
+            window.removeEventListener('resize', this.onWindowResize);
+            this.onWindowResize = null;
+        }
         this.stopBackgroundMusic();
         if (this.game) {
             this.game.destroy(true);

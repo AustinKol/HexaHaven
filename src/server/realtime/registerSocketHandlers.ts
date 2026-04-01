@@ -89,6 +89,23 @@ function normalizeId(rawValue: unknown): string | null {
   return null;
 }
 
+function createFallbackCreateGameRequest(room: Room): CreateGameRequest {
+  return {
+    displayName: room.players[0]?.name ?? 'Host',
+    config: {
+      playerCount: room.maxPlayers,
+      goalCount: 0,
+      winRule: 'ALL_GOALS_COMPLETE',
+      mapSeed: 0,
+      mapSize: 'small',
+      timerEnabled: false,
+      turnTimeSec: null,
+      allowReroll: false,
+      startingResources: cloneResources(),
+    },
+  };
+}
+
 function buildInitialGameStateFromRoom(room: Room, request: CreateGameRequest): GameState {
   const nowIso = new Date().toISOString();
   const playerOrder = room.players.map((player) => player.id);
@@ -417,20 +434,7 @@ export function registerSocketHandlers(
 
       const existingGameState = roomManager.getGameState(gameId);
       const gameState = existingGameState
-        ?? roomManager.initializeGameState(gameId, buildInitialGameStateFromRoom(room, {
-          displayName: room.players[0]?.name ?? 'Host',
-          config: {
-            playerCount: room.maxPlayers,
-            goalCount: 0,
-            winRule: 'ALL_GOALS_COMPLETE',
-            mapSeed: 0,
-            mapSize: 'small',
-            timerEnabled: false,
-            turnTimeSec: null,
-            allowReroll: false,
-            startingResources: cloneResources(),
-          },
-        }));
+        ?? roomManager.initializeGameState(gameId, buildInitialGameStateFromRoom(room, createFallbackCreateGameRequest(room)));
 
       if (!gameState) {
         rejectAction(socket, ack, {

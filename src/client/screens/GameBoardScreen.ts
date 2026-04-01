@@ -1,11 +1,139 @@
 import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledMusicVolume } from '../audio/musicVolume';
 import { SETTINGS_CHANGED_EVENT } from '../settings/gameSettings';
 import { ScreenId } from '../../shared/constants/screenIds';
-import type { DiceRoll, GamePhase, GameState } from '../../shared/types/domain';
+import type { DiceRoll, GamePhase, GameState, ResourceBundle } from '../../shared/types/domain';
 import { connectSocket, endTurn, rollDice } from '../networking/socketClient';
-import { subscribeClientState } from '../state/clientState';
+import { clientState, setClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
 import { TestMapGenScreen } from './TestMapGenScreen';
+
+type ResourceKey = keyof ResourceBundle;
+
+/** Bottom bar + UI reserved for Phaser (taller bar needs more clearance). */
+const GAME_BOARD_BOTTOM_BAR_PX = 84;
+/** ~0.5cm at 96dpi — extra inset so the map sits slightly higher. */
+const GAME_BOARD_MAP_LIFT_PX = 20;
+
+/** Matches map biome feel (see TestMapGenScreen BIOME_PALETTE); tuned for UI legibility. */
+const RESOURCE_BOX_CONFIG: {
+  key: ResourceKey;
+  shortLabel: string;
+  color: string;
+  iconSrc?: string;
+  boxBg: string;
+  boxBorder: string;
+  boxHoverBg: string;
+  countColor: string;
+}[] = [
+  {
+    key: 'CRYSTAL',
+    shortLabel: 'Cr',
+    color: '#93c5fd',
+    iconSrc: '/images/resources/crystal.png',
+    boxBg: '#e8f4fa',
+    boxBorder: '#9ec5d8',
+    boxHoverBg: '#dceef6',
+    countColor: '#1a3d4d',
+  },
+  {
+    key: 'STONE',
+    shortLabel: 'St',
+    color: '#a3a3a3',
+    iconSrc: '/images/resources/stone.png',
+    boxBg: '#c5c9d2',
+    boxBorder: '#8b909c',
+    boxHoverBg: '#b6bbc6',
+    countColor: '#252a32',
+  },
+  {
+    key: 'BLOOM',
+    shortLabel: 'Bl',
+    color: '#74b95e',
+    iconSrc: '/images/resources/bloom.png',
+    boxBg: '#d2ebc0',
+    boxBorder: '#6fb253',
+    boxHoverBg: '#c4e3ae',
+    countColor: '#1e3d18',
+  },
+  {
+    key: 'EMBER',
+    shortLabel: 'Em',
+    color: '#c28d5b',
+    iconSrc: '/images/resources/ember.png',
+    boxBg: '#3d2818',
+    boxBorder: '#6b4a36',
+    boxHoverBg: '#4a3224',
+    countColor: '#f0e6dc',
+  },
+  {
+    key: 'GOLD',
+    shortLabel: 'Go',
+    color: '#fde047',
+    iconSrc: '/images/resources/gold.png',
+    boxBg: '#f0d050',
+    boxBorder: '#c49a24',
+    boxHoverBg: '#f5dc68',
+    countColor: '#3d2e0a',
+  },
+];
+
+const RESOURCE_KEYS: ResourceKey[] = ['CRYSTAL', 'STONE', 'BLOOM', 'EMBER', 'GOLD'];
+
+function emptyResourceBundle(): ResourceBundle {
+  return { CRYSTAL: 0, STONE: 0, BLOOM: 0, EMBER: 0, GOLD: 0 };
+}
+
+function resourceBundlesEqual(a: ResourceBundle, b: ResourceBundle): boolean {
+  return RESOURCE_KEYS.every((k) => (a[k] ?? 0) === (b[k] ?? 0));
+}
+
+/** True when selection equals `cost` (zeros elsewhere) and the player can pay that cost. */
+function isBuildOptionReady(
+  selection: ResourceBundle,
+  cost: ResourceBundle,
+  inventory: ResourceBundle,
+): boolean {
+  if (!resourceBundlesEqual(selection, cost)) {
+    return false;
+  }
+  return RESOURCE_KEYS.every((k) => (inventory[k] ?? 0) >= (cost[k] ?? 0));
+}
+
+function cloneGameState(gs: GameState): GameState {
+  return JSON.parse(JSON.stringify(gs)) as GameState;
+}
+
+type BuildKind = 'ROAD' | 'SETTLEMENT' | 'CITY' | 'DEV_CARD';
+
+/**
+ * Costs (selection must match): Road 1E+1St · Settlement 1E+1Bl+1St · City 3St+2Bl · Dev 2Cr+2Go
+ */
+const BUILD_OPTIONS: { kind: BuildKind; label: string; cost: ResourceBundle; iconSrc?: string }[] = [
+  {
+    kind: 'ROAD',
+    label: 'Road',
+    cost: { CRYSTAL: 0, STONE: 1, BLOOM: 0, EMBER: 1, GOLD: 0 },
+    iconSrc: '/images/buildings/road.png',
+  },
+  {
+    kind: 'SETTLEMENT',
+    label: 'Settlement',
+    cost: { CRYSTAL: 0, STONE: 1, BLOOM: 1, EMBER: 1, GOLD: 0 },
+    iconSrc: '/images/buildings/settlement.png',
+  },
+  {
+    kind: 'CITY',
+    label: 'City',
+    cost: { CRYSTAL: 0, STONE: 3, BLOOM: 2, EMBER: 0, GOLD: 0 },
+    iconSrc: '/images/buildings/city.png',
+  },
+  {
+    kind: 'DEV_CARD',
+    label: 'Dev Card',
+    cost: { CRYSTAL: 2, STONE: 0, BLOOM: 0, EMBER: 0, GOLD: 2 },
+    iconSrc: '/images/buildings/dev-card.png',
+  },
+];
 
 export interface GameBoardTurnHudLiveValues {
   currentPlayer?: string | null;
@@ -28,6 +156,13 @@ export class GameBoardScreen {
   private exitButton: HTMLButtonElement | null = null;
   private musicToggleButton: HTMLButtonElement | null = null;
   private playerPanel: HTMLDivElement | null = null;
+  private resourceBar: HTMLDivElement | null = null;
+  /** Player + resource buttons; cleared on each state refresh. */
+  private resourceBarLeft: HTMLDivElement | null = null;
+  /** Build actions (right side); rebuilt each refresh. */
+  private resourceBarRight: HTMLDivElement | null = null;
+  /** Multiset of resources picked for a build (tap a resource to cycle 0…owned). */
+  private resourceSelection: ResourceBundle = emptyResourceBundle();
   private turnHudPanel: HTMLDivElement | null = null;
   private currentPlayerValue: HTMLDivElement | null = null;
   private currentPhaseValue: HTMLDivElement | null = null;
@@ -67,6 +202,9 @@ export class GameBoardScreen {
       showRegenerateButton: false,
       allowPointerRegenerate: false,
       mapSeed: roomId ?? undefined,
+      compactFit: true,
+      reservedBottomPx: GAME_BOARD_BOTTOM_BAR_PX,
+      mapLiftPx: GAME_BOARD_MAP_LIFT_PX,
     });
     this.mapScreen.render(
       parentElement,
@@ -80,14 +218,18 @@ export class GameBoardScreen {
     }
     this.mountPlayerPanel(this.buttonContainer);
     this.mountTurnHud(this.buttonContainer);
+    this.mountResourceBar(this.buttonContainer);
     if (roomId) {
       connectSocket({ gameId: roomId, playerId: session?.playerId });
       this.unsubscribe = subscribeClientState((state) => {
         this.liveGameState = state.gameState;
         this.livePlayerId = state.playerId ?? this.livePlayerId;
         this.updateTurnHud();
-        this.renderPlayerCardsFromGameState();
+        this.refreshPlayerUi();
       });
+    } else {
+      this.liveGameState = clientState.gameState;
+      this.refreshPlayerUi();
     }
 
     if (!navigate) {
@@ -119,9 +261,10 @@ export class GameBoardScreen {
     this.musicToggleButton = document.createElement('button');
     this.musicToggleButton.type = 'button';
     this.musicToggleButton.style.position = 'absolute';
-    this.musicToggleButton.style.bottom = '16px';
+    /** Sits on the bottom bar: overlap ~half the button with the bar; +38px total lift (incl. ~0.2cm @ 96dpi). */
+    this.musicToggleButton.style.bottom = `${Math.max(12, GAME_BOARD_BOTTOM_BAR_PX - 32 + 38)}px`;
     this.musicToggleButton.style.right = '16px';
-    this.musicToggleButton.style.zIndex = '3';
+    this.musicToggleButton.style.zIndex = '10';
     this.musicToggleButton.style.display = 'flex';
     this.musicToggleButton.style.alignItems = 'center';
     this.musicToggleButton.style.justifyContent = 'center';
@@ -142,11 +285,49 @@ export class GameBoardScreen {
       this.playerPanel.remove();
     }
     const panel = document.createElement('div');
-    panel.className = 'absolute top-16 left-4 flex flex-col gap-3';
+    panel.className = 'absolute top-16 left-4 flex flex-col gap-2';
     panel.style.zIndex = '3';
-    panel.style.width = '180px';
+    panel.style.width = '128px';
     this.playerPanel = panel;
     parent.appendChild(panel);
+  }
+
+  private mountResourceBar(parent: HTMLElement): void {
+    if (this.resourceBar) {
+      this.resourceBar.remove();
+    }
+    const bar = document.createElement('div');
+    bar.className =
+      'absolute bottom-0 left-0 right-0 pointer-events-none border-t border-slate-600/90 bg-slate-950/92 shadow-[0_-4px_16px_rgba(0,0,0,0.35)]';
+    bar.style.zIndex = '3';
+
+    const row = document.createElement('div');
+    row.className =
+      'flex w-full flex-row flex-wrap items-stretch justify-between gap-x-2 gap-y-1.5 px-2.5 py-2 min-h-[72px]';
+
+    const left = document.createElement('div');
+    left.className =
+      'font-hexahaven-ui flex min-h-0 min-w-0 flex-1 flex-row flex-nowrap items-stretch justify-start gap-0.5 self-stretch pointer-events-auto';
+
+    const right = document.createElement('div');
+    right.id = 'game-board-bottom-bar-right';
+    right.className =
+      'flex min-h-0 min-w-0 flex-1 items-stretch justify-end gap-1.5 self-stretch pointer-events-auto';
+    right.setAttribute('aria-label', 'Bottom bar — right section');
+
+    row.appendChild(left);
+    row.appendChild(right);
+    bar.appendChild(row);
+
+    this.resourceBar = bar;
+    this.resourceBarLeft = left;
+    this.resourceBarRight = right;
+    parent.appendChild(bar);
+  }
+
+  /** Right side of the bottom bar (build actions). Content is managed by `renderBuildingBarFromGameState`. */
+  getBottomBarRightSlot(): HTMLDivElement | null {
+    return this.resourceBarRight;
   }
 
   private mountTurnHud(parent: HTMLElement): void {
@@ -220,6 +401,12 @@ export class GameBoardScreen {
     this.updateTurnHud();
   }
 
+  private refreshPlayerUi(): void {
+    this.renderPlayerCardsFromGameState();
+    this.renderResourceBarFromGameState();
+    this.renderBuildingBarFromGameState();
+  }
+
   private renderPlayerCardsFromGameState(): void {
     const gameState = this.liveGameState;
     if (!this.playerPanel || !gameState) {
@@ -233,36 +420,203 @@ export class GameBoardScreen {
       }
 
       const card = document.createElement('div');
-      card.className = 'rounded-xl border border-slate-500 bg-slate-900/85 px-3 py-3 text-white shadow-md';
+      card.className = 'rounded-lg border border-slate-500 bg-slate-900/85 px-2 py-2 text-white shadow-md';
 
       const avatar = document.createElement('img');
       avatar.src = player.avatarUrl ?? '/avatar/avatar_1.png';
       avatar.alt = `${player.displayName} avatar`;
-      avatar.className = 'mx-auto mb-2 h-16 w-16 bg-transparent object-cover';
+      avatar.className = 'mx-auto mb-1 h-10 w-10 bg-transparent object-cover rounded-md';
 
       const name = document.createElement('div');
-      name.className = 'font-hexahaven-ui text-sm text-center truncate';
+      name.className = 'font-hexahaven-ui text-[11px] text-center truncate';
       name.textContent = player.displayName;
 
       const points = document.createElement('div');
-      points.className = 'font-hexahaven-ui mt-2 text-xs text-slate-200 text-center';
-      points.textContent = `Points: ${player.stats.publicVP ?? 0}`;
-
-      const resources = document.createElement('div');
-      resources.className = 'font-hexahaven-ui mt-2 text-xs leading-5 text-center';
-      resources.innerHTML = [
-        `<span style="color: #c28d5b;">Ember: ${player.resources.EMBER ?? 0}</span>`,
-        `<span style="color: #a3a3a3;">Stone: ${player.resources.STONE ?? 0}</span>`,
-        `<span style="color: #74b95e;">Bloom: ${player.resources.BLOOM ?? 0}</span>`,
-        `<span style="color: #fde047;">Gold: ${player.resources.GOLD ?? 0}</span>`,
-      ].join('<br>');
+      points.className = 'font-hexahaven-ui mt-1 text-[10px] text-slate-200 text-center leading-tight';
+      points.textContent = `Victory Points: ${player.stats.publicVP ?? 0}`;
 
       card.appendChild(avatar);
       card.appendChild(name);
       card.appendChild(points);
-      card.appendChild(resources);
       this.playerPanel?.appendChild(card);
     });
+  }
+
+  private renderResourceBarFromGameState(): void {
+    const gameState = this.liveGameState;
+    if (!this.resourceBarLeft || !gameState) {
+      return;
+    }
+    this.resourceBarLeft.innerHTML = '';
+
+    const viewerId = this.livePlayerId;
+    if (viewerId === null || viewerId === 'spectator') {
+      return;
+    }
+
+    const player = gameState.playersById[viewerId];
+    if (!player) {
+      return;
+    }
+
+    this.clampResourceSelectionToInventory(player.resources);
+
+    RESOURCE_BOX_CONFIG.forEach(
+      ({ key, shortLabel, color, iconSrc, boxBg, boxBorder, boxHoverBg, countColor }) => {
+        const owned = player.resources[key] ?? 0;
+        const selected = this.resourceSelection[key] ?? 0;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className =
+          'flex w-[42px] shrink-0 flex-col items-center justify-center gap-0.5 self-stretch rounded-md border px-1 py-1.5 shadow-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 cursor-pointer';
+        btn.style.backgroundColor = boxBg;
+        btn.style.borderColor = selected > 0 ? '#34d399' : boxBorder;
+        btn.style.borderWidth = selected > 0 ? '2px' : '1px';
+        btn.style.boxShadow = selected > 0 ? '0 0 0 1px rgba(52, 211, 153, 0.45)' : '';
+        btn.style.borderStyle = 'solid';
+        btn.addEventListener('mouseenter', () => {
+          btn.style.backgroundColor = boxHoverBg;
+        });
+        btn.addEventListener('mouseleave', () => {
+          btn.style.backgroundColor = boxBg;
+        });
+        btn.setAttribute('aria-label', `${key}: ${selected} selected of ${owned}`);
+        btn.addEventListener('click', () => this.cycleResourceSelection(key));
+
+        if (iconSrc) {
+          const img = document.createElement('img');
+          img.src = iconSrc;
+          img.alt = shortLabel;
+          img.className = 'h-8 w-8 max-h-[36px] object-contain pointer-events-none';
+          img.draggable = false;
+          btn.appendChild(img);
+        } else {
+          const abbr = document.createElement('span');
+          abbr.className = 'font-hexahaven-ui text-[9px] font-bold leading-none pointer-events-none';
+          abbr.style.color = color;
+          abbr.textContent = shortLabel;
+          btn.appendChild(abbr);
+        }
+
+        const count = document.createElement('span');
+        count.className = 'text-[9px] font-semibold tabular-nums pointer-events-none leading-none';
+        count.style.color = countColor;
+        count.textContent = owned > 0 ? `${selected}/${owned}` : '0';
+        btn.appendChild(count);
+
+        this.resourceBarLeft.appendChild(btn);
+      },
+    );
+  }
+
+  private clampResourceSelectionToInventory(inv: ResourceBundle): void {
+    for (const k of RESOURCE_KEYS) {
+      const owned = inv[k] ?? 0;
+      const sel = this.resourceSelection[k] ?? 0;
+      if (sel > owned) {
+        this.resourceSelection = { ...this.resourceSelection, [k]: owned };
+      }
+    }
+  }
+
+  private cycleResourceSelection(key: ResourceKey): void {
+    const gs = this.liveGameState ?? clientState.gameState;
+    const pid = this.livePlayerId;
+    if (!gs || !pid) {
+      return;
+    }
+    const player = gs.playersById[pid];
+    if (!player) {
+      return;
+    }
+    const owned = player.resources[key] ?? 0;
+    if (owned <= 0) {
+      return;
+    }
+    const current = this.resourceSelection[key] ?? 0;
+    const next = (current + 1) % (owned + 1);
+    this.resourceSelection = { ...this.resourceSelection, [key]: next };
+    this.refreshPlayerUi();
+  }
+
+  private renderBuildingBarFromGameState(): void {
+    if (!this.resourceBarRight) {
+      return;
+    }
+    this.resourceBarRight.innerHTML = '';
+
+    const gameState = this.liveGameState ?? clientState.gameState;
+    const viewerId = this.livePlayerId;
+    if (!gameState || viewerId === null || viewerId === 'spectator') {
+      return;
+    }
+    const player = gameState.playersById[viewerId];
+    if (!player) {
+      return;
+    }
+
+    this.clampResourceSelectionToInventory(player.resources);
+
+    BUILD_OPTIONS.forEach(({ kind, label, cost, iconSrc }) => {
+      const ready = isBuildOptionReady(this.resourceSelection, cost, player.resources);
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className =
+        'font-hexahaven-ui flex min-w-[56px] flex-col items-center justify-center self-stretch rounded-md border px-2 py-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/90';
+      if (ready) {
+        btn.className +=
+          ' cursor-pointer border-emerald-400/80 bg-emerald-100 text-emerald-950 shadow-[0_0_14px_rgba(16,185,129,0.16)]';
+        btn.disabled = false;
+      } else {
+        btn.className +=
+          ' cursor-not-allowed border-slate-600 bg-slate-800/80 text-slate-500 opacity-70';
+        btn.disabled = true;
+      }
+      btn.setAttribute('aria-label', label);
+      if (iconSrc) {
+        const img = document.createElement('img');
+        img.src = iconSrc;
+        img.alt = label;
+        img.className = 'h-11 w-11 max-h-[44px] object-contain pointer-events-none';
+        img.draggable = false;
+        btn.appendChild(img);
+      }
+      if (ready) {
+        btn.addEventListener('click', () => this.onBuildingClicked(kind, cost));
+      }
+      this.resourceBarRight?.appendChild(btn);
+    });
+  }
+
+  private onBuildingClicked(_kind: BuildKind, cost: ResourceBundle): void {
+    const gs = this.liveGameState ?? clientState.gameState;
+    const pid = this.livePlayerId;
+    if (!gs || !pid) {
+      return;
+    }
+    const p0 = gs.playersById[pid];
+    if (!p0 || !isBuildOptionReady(this.resourceSelection, cost, p0.resources)) {
+      return;
+    }
+    const next = cloneGameState(gs);
+    const p = next.playersById[pid];
+    if (!p) {
+      return;
+    }
+    for (const k of RESOURCE_KEYS) {
+      if ((p.resources[k] ?? 0) < (cost[k] ?? 0)) {
+        return;
+      }
+    }
+    for (const k of RESOURCE_KEYS) {
+      p.resources[k] = (p.resources[k] ?? 0) - (cost[k] ?? 0);
+    }
+    p.updatedAt = new Date().toISOString();
+    this.resourceSelection = emptyResourceBundle();
+    setClientState({ gameState: next });
+    this.liveGameState = next;
+    this.refreshPlayerUi();
   }
 
   private updateTurnHud(): void {
@@ -397,6 +751,12 @@ export class GameBoardScreen {
       this.playerPanel.remove();
       this.playerPanel = null;
     }
+    if (this.resourceBar) {
+      this.resourceBar.remove();
+      this.resourceBar = null;
+    }
+    this.resourceBarLeft = null;
+    this.resourceBarRight = null;
     if (this.turnHudPanel) {
       this.turnHudPanel.remove();
       this.turnHudPanel = null;
@@ -411,5 +771,6 @@ export class GameBoardScreen {
     this.mapScreen = null;
     this.liveGameState = null;
     this.livePlayerId = null;
+    this.resourceSelection = emptyResourceBundle();
   }
 }

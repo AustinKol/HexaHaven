@@ -1,10 +1,23 @@
-import type { GameState } from '../../shared/types/domain';
+import type { GameState, ResourceBundle } from '../../shared/types/domain';
 import type { AckError } from '../../shared/types/socket';
 import { TurnManager } from './TurnManager';
 
 export type EngineResult =
   | { ok: true; gameState: GameState }
   | { ok: false; error: AckError };
+
+/** One of each type — five resource units total per player when config starting hand is empty. */
+const DEFAULT_STARTING_HAND: ResourceBundle = {
+  CRYSTAL: 1,
+  STONE: 1,
+  BLOOM: 1,
+  EMBER: 1,
+  GOLD: 1,
+};
+
+function sumResourceBundle(bundle: ResourceBundle): number {
+  return bundle.CRYSTAL + bundle.STONE + bundle.BLOOM + bundle.EMBER + bundle.GOLD;
+}
 
 export class GameEngine {
   private readonly turnManager = new TurnManager();
@@ -23,9 +36,22 @@ export class GameEngine {
       return this.fail('INVALID_CONFIGURATION', 'First player in order does not exist in playersById.');
     }
 
+    const startingHand: ResourceBundle =
+      sumResourceBundle(gameState.config.startingResources) > 0
+        ? { ...gameState.config.startingResources }
+        : { ...DEFAULT_STARTING_HAND };
+
+    const playersWithStartingHand = Object.fromEntries(
+      Object.entries(gameState.playersById).map(([id, player]) => [
+        id,
+        { ...player, resources: { ...startingHand } },
+      ]),
+    );
+
     const inProgressState: GameState = {
       ...gameState,
       roomStatus: 'in_progress',
+      playersById: playersWithStartingHand,
     };
 
     const initializedState = this.turnManager.initializeFirstTurn(inProgressState, startedAtIso);
