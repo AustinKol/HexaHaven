@@ -1,5 +1,195 @@
 # HexaHaven — Demo 2 Plan
 
+## 7-Person Task Split
+
+### Austin Wang — `feat/gameplay-engine`
+
+**Files**
+- `src/server/engine/GameEngine.ts`
+- `src/server/engine/TurnManager.ts`
+- `src/server/engine/SetupManager.ts`
+- `src/server/engine/PlacementValidator.ts`
+- `src/server/engine/ResourceManager.ts`
+- `src/server/engine/VictoryManager.ts`
+- `src/server/engine/LongestRoadManager.ts`
+
+**Exact job**
+- Own the server gameplay rules.
+- Implement manual setup progression.
+- Implement placement validation for setup and normal building.
+- Implement resource distribution after dice rolls.
+- Implement VP recomputation, longest road, and win detection.
+- Expose clear engine calls for the realtime and persistence layers to use.
+
+**Acceptance criteria**
+- Illegal setup placements are rejected.
+- Illegal build placements are rejected.
+- Dice/resource/build/win logic works server-side without client-side rule authority.
+- Longest road and VP totals update correctly.
+- Reaching `10 VP` produces a finished authoritative state.
+
+### Nathan Hu — `feat/contracts-realtime`
+
+**Files**
+- `src/shared/types/domain.ts`
+- `src/shared/types/socket.ts`
+- `src/shared/constants/socketEvents.ts`
+- `src/server/realtime/registerSocketHandlers.ts`
+- `src/server/sessions/RoomManager.ts`
+- `src/server/http/routes/rooms.ts`
+
+**Exact job**
+- Freeze the Demo 2 shared contracts.
+- Replace `GARDEN` with `CITY`.
+- Add the setup and trade state needed by Demo 2.
+- Add the new socket actions and wire them to the engine and persistence path.
+- Make join/reload pull the latest game state instead of relying on client-local assumptions.
+
+**Acceptance criteria**
+- The shared types match the Demo 2 ruleset.
+- All retained and new socket actions are wired end to end.
+- Joining or reloading can recover the latest active game snapshot.
+- No duplicate client-only or server-only payload shapes remain.
+
+### Helena Clifford — `feat/firestore-live`
+
+**Files**
+- `src/server/config/firebaseAdmin.ts`
+- `src/server/persistence/FirestoreRepository.ts`
+- `src/server/persistence/gameSessionsRepository.ts`
+- `src/server/persistence/playersRepository.ts`
+- `src/server/persistence/boardRepository.ts`
+- `src/server/persistence/turnsRepository.ts`
+- `src/server/persistence/GamePersistenceService.ts`
+
+**Exact job**
+- Make Firestore the live persistence layer for Demo 2.
+- Implement the write path for create, join, start, setup placement, roll, build, trade, end turn, and game finish.
+- Implement loading the latest saved game snapshot from Firestore.
+- Ensure failed writes prevent the server from mutating local room state.
+
+**Acceptance criteria**
+- Every successful gameplay action is written to Firestore before broadcast.
+- Persisted Firestore state matches the broadcast state.
+- A saved room can be loaded back into server memory from Firestore.
+- Firestore failures block invalid partial updates.
+
+### Brandon Lee Felix — `feat/board-interactions`
+
+**Files**
+- `src/client/screens/TestMapGenScreen.ts`
+- `src/client/rendering/CanvasRoot.ts`
+- `src/client/rendering/RendererRoot.ts`
+- `src/client/input/InputRegistry.ts`
+- `src/client/rendering/BoardInteractionOverlay.ts`
+- `src/client/rendering/BoardStructureRenderer.ts`
+
+**Exact job**
+- Own board interaction on the client.
+- Map live vertex IDs and edge IDs onto the rendered board.
+- Render placed roads, settlements, and cities from `GameState.board`.
+- Implement hover/select/click handling for setup and building.
+
+**Acceptance criteria**
+- The player can click legal vertices and edges during setup/build flow.
+- Invalid targets are visibly blocked.
+- Roads, settlements, and cities render in the right positions on both clients.
+- The board remains stable while live updates arrive.
+
+### Emily Zhang — `feat/gameboard-ui`
+
+**Files**
+- `src/client/screens/GameBoardScreen.ts`
+- `src/client/screens/ResultScreen.ts`
+- `src/client/ui/ResourceTray.ts`
+- `src/client/ui/BuildPanel.ts`
+- `src/client/ui/TradePanel.ts`
+- `src/client/ui/VictoryPanel.ts`
+
+**Exact job**
+- Own the main gameplay HUD and result screen.
+- Show active player, phase, dice result, resources, VP, and available actions.
+- Build the UI for build actions and trade actions.
+- Show win state and final result when the game ends.
+- Connect board selections from Brandon's overlay into the visible gameplay UI.
+
+**Acceptance criteria**
+- Resources and VP are always visible.
+- Players can submit build and trade actions from the UI.
+- Turn state and last roll are clear to all players.
+- The result screen appears correctly when the game finishes.
+
+### Barry Lu — `feat/trading`
+
+**Files**
+- `src/server/engine/TradeManager.ts`
+- `src/client/networking/socketClient.ts`
+- `src/client/networking/registerClientEvents.ts`
+- `src/client/state/tradeState.ts`
+
+**Exact job**
+- Own trading.
+- Implement bank trade validation and execution.
+- Implement one-offer-at-a-time player trade flow.
+- Wire trade actions into the client networking layer so Emily's UI can call them cleanly.
+
+**Acceptance criteria**
+- Bank trade works only for the active player and deducts/adds the correct resources.
+- Player trade supports offer, accept, reject, and cancel.
+- Accepted trades update both players atomically.
+- Trade state stays synchronized across both clients.
+
+### James Huang — `feat/dice-timer`
+
+**Files**
+- `src/server/engine/DiceManager.ts`
+- `src/server/engine/TimerManager.ts`
+- `src/server/persistence/turnsRepository.ts`
+- `src/client/ui/DiceRollBanner.ts`
+- `src/client/ui/TurnTimer.ts`
+
+**Exact job**
+- Own the dice roll service and turn timing helpers.
+- Keep dice generation isolated and reusable.
+- Persist turn start/end and dice roll records to Firestore turn docs.
+- Provide dice/timer UI pieces that Emily can mount into the board screen.
+
+**Acceptance criteria**
+- Dice results are always valid and only happen once per turn.
+- Turn timing and dice logs persist correctly.
+- The latest roll is clearly displayed on the client.
+- Timer UI resets correctly when a new turn begins if timer display is enabled.
+
+## Phases
+
+### Phase 1 — Contracts and Persistence Path
+
+- Nathan freezes the shared types and action surface.
+- Helena finalizes the Firestore write/load path.
+- Austin aligns the engine interfaces to those contracts.
+
+### Phase 2 — Server Gameplay Core
+
+- Austin implements setup, legality, resources, VP, longest road, and win logic.
+- Barry implements trade logic.
+- James implements dice and turn timing helpers.
+
+### Phase 3 — Client Board and Gameplay UI
+
+- Brandon lands board interaction and structure rendering.
+- Emily lands the gameplay HUD, build UI, trade UI, and result screen.
+
+### Phase 4 — End-to-End Integration
+
+- Nathan wires every action through realtime handlers.
+- Helena connects persistence before broadcast.
+- The team gets create, join, setup, roll, build, trade, and finish running across two browsers.
+
+### Phase 5 — Hardening and Demo Polish
+
+- Fix sync issues, persistence issues, legality bugs, and UI clarity issues.
+- Run the full demo flow until it is stable without manual intervention.
+
 ## Demo 2 Goal
 
 By the end of Demo 2, the game should support a full Firestore-backed multiplayer slice:
@@ -159,196 +349,6 @@ Development cards are not part of Demo 2.
   5. broadcast `GAME_STATE_UPDATE`
 - `ACTION_REJECTED` is sent only to the requesting client when validation fails or Firestore persistence fails.
 - No extra broadcast event is required for trade state, setup state, or win state; those all travel inside `GAME_STATE_UPDATE`.
-
-## 7-Person Task Split
-
-### Austin Wang — `feat/demo2-gameplay-engine`
-
-**Files**
-- `src/server/engine/GameEngine.ts`
-- `src/server/engine/TurnManager.ts`
-- `src/server/engine/SetupManager.ts`
-- `src/server/engine/PlacementValidator.ts`
-- `src/server/engine/ResourceManager.ts`
-- `src/server/engine/VictoryManager.ts`
-- `src/server/engine/LongestRoadManager.ts`
-
-**Exact job**
-- Own the server gameplay rules.
-- Implement manual setup progression.
-- Implement placement validation for setup and normal building.
-- Implement resource distribution after dice rolls.
-- Implement VP recomputation, longest road, and win detection.
-- Expose clear engine calls for the realtime and persistence layers to use.
-
-**Acceptance criteria**
-- Illegal setup placements are rejected.
-- Illegal build placements are rejected.
-- Dice/resource/build/win logic works server-side without client-side rule authority.
-- Longest road and VP totals update correctly.
-- Reaching `10 VP` produces a finished authoritative state.
-
-### Nathan Hu — `feat/demo2-contracts-realtime`
-
-**Files**
-- `src/shared/types/domain.ts`
-- `src/shared/types/socket.ts`
-- `src/shared/constants/socketEvents.ts`
-- `src/server/realtime/registerSocketHandlers.ts`
-- `src/server/sessions/RoomManager.ts`
-- `src/server/http/routes/rooms.ts`
-
-**Exact job**
-- Freeze the Demo 2 shared contracts.
-- Replace `GARDEN` with `CITY`.
-- Add the setup and trade state needed by Demo 2.
-- Add the new socket actions and wire them to the engine and persistence path.
-- Make join/reload pull the latest game state instead of relying on client-local assumptions.
-
-**Acceptance criteria**
-- The shared types match the Demo 2 ruleset.
-- All retained and new socket actions are wired end to end.
-- Joining or reloading can recover the latest active game snapshot.
-- No duplicate client-only or server-only payload shapes remain.
-
-### Helena Clifford — `feat/demo2-firestore-live`
-
-**Files**
-- `src/server/config/firebaseAdmin.ts`
-- `src/server/persistence/FirestoreRepository.ts`
-- `src/server/persistence/gameSessionsRepository.ts`
-- `src/server/persistence/playersRepository.ts`
-- `src/server/persistence/boardRepository.ts`
-- `src/server/persistence/turnsRepository.ts`
-- `src/server/persistence/GamePersistenceService.ts`
-
-**Exact job**
-- Make Firestore the live persistence layer for Demo 2.
-- Implement the write path for create, join, start, setup placement, roll, build, trade, end turn, and game finish.
-- Implement loading the latest saved game snapshot from Firestore.
-- Ensure failed writes prevent the server from mutating local room state.
-
-**Acceptance criteria**
-- Every successful gameplay action is written to Firestore before broadcast.
-- Persisted Firestore state matches the broadcast state.
-- A saved room can be loaded back into server memory from Firestore.
-- Firestore failures block invalid partial updates.
-
-### Brandon Lee Felix — `feat/demo2-board-interactions`
-
-**Files**
-- `src/client/screens/TestMapGenScreen.ts`
-- `src/client/rendering/CanvasRoot.ts`
-- `src/client/rendering/RendererRoot.ts`
-- `src/client/input/InputRegistry.ts`
-- `src/client/rendering/BoardInteractionOverlay.ts`
-- `src/client/rendering/BoardStructureRenderer.ts`
-
-**Exact job**
-- Own board interaction on the client.
-- Map live vertex IDs and edge IDs onto the rendered board.
-- Render placed roads, settlements, and cities from `GameState.board`.
-- Implement hover/select/click handling for setup and building.
-
-**Acceptance criteria**
-- The player can click legal vertices and edges during setup/build flow.
-- Invalid targets are visibly blocked.
-- Roads, settlements, and cities render in the right positions on both clients.
-- The board remains stable while live updates arrive.
-
-### Emily Zhang — `feat/demo2-gameboard-ui`
-
-**Files**
-- `src/client/screens/GameBoardScreen.ts`
-- `src/client/screens/ResultScreen.ts`
-- `src/client/ui/ResourceTray.ts`
-- `src/client/ui/BuildPanel.ts`
-- `src/client/ui/TradePanel.ts`
-- `src/client/ui/VictoryPanel.ts`
-
-**Exact job**
-- Own the main gameplay HUD and result screen.
-- Show active player, phase, dice result, resources, VP, and available actions.
-- Build the UI for build actions and trade actions.
-- Show win state and final result when the game ends.
-- Connect board selections from Brandon's overlay into the visible gameplay UI.
-
-**Acceptance criteria**
-- Resources and VP are always visible.
-- Players can submit build and trade actions from the UI.
-- Turn state and last roll are clear to all players.
-- The result screen appears correctly when the game finishes.
-
-### Barry Lu — `feat/demo2-trading`
-
-**Files**
-- `src/server/engine/TradeManager.ts`
-- `src/client/networking/socketClient.ts`
-- `src/client/networking/registerClientEvents.ts`
-- `src/client/state/tradeState.ts`
-
-**Exact job**
-- Own Demo 2 trading.
-- Implement bank trade validation and execution.
-- Implement one-offer-at-a-time player trade flow.
-- Wire trade actions into the client networking layer so Emily's UI can call them cleanly.
-
-**Acceptance criteria**
-- Bank trade works only for the active player and deducts/adds the correct resources.
-- Player trade supports offer, accept, reject, and cancel.
-- Accepted trades update both players atomically.
-- Trade state stays synchronized across both clients.
-
-### James Huang — `feat/demo2-dice-timer`
-
-**Files**
-- `src/server/engine/DiceManager.ts`
-- `src/server/engine/TimerManager.ts`
-- `src/server/persistence/turnsRepository.ts`
-- `src/client/ui/DiceRollBanner.ts`
-- `src/client/ui/TurnTimer.ts`
-
-**Exact job**
-- Own the dice roll service and turn timing helpers.
-- Keep dice generation isolated and reusable.
-- Persist turn start/end and dice roll records to Firestore turn docs.
-- Provide dice/timer UI pieces that Emily can mount into the board screen.
-
-**Acceptance criteria**
-- Dice results are always valid and only happen once per turn.
-- Turn timing and dice logs persist correctly.
-- The latest roll is clearly displayed on the client.
-- Timer UI resets correctly when a new turn begins if timer display is enabled.
-
-## Phases
-
-### Phase 1 — Contracts and Persistence Path
-
-- Nathan freezes the shared types and action surface.
-- Helena finalizes the Firestore write/load path.
-- Austin aligns the engine interfaces to those contracts.
-
-### Phase 2 — Server Gameplay Core
-
-- Austin implements setup, legality, resources, VP, longest road, and win logic.
-- Barry implements trade logic.
-- James implements dice and turn timing helpers.
-
-### Phase 3 — Client Board and Gameplay UI
-
-- Brandon lands board interaction and structure rendering.
-- Emily lands the gameplay HUD, build UI, trade UI, and result screen.
-
-### Phase 4 — End-to-End Integration
-
-- Nathan wires every action through realtime handlers.
-- Helena connects persistence before broadcast.
-- The team gets create, join, setup, roll, build, trade, and finish running across two browsers.
-
-### Phase 5 — Hardening and Demo Polish
-
-- Fix sync issues, persistence issues, legality bugs, and UI clarity issues.
-- Run the full demo flow until it is stable without manual intervention.
 
 ## Full Demo 2 Gameplay Runthrough
 

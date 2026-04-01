@@ -1,6 +1,6 @@
 # Demo 2 — First Actions Tonight
 
-## Austin Wang — `feat/demo2-gameplay-engine`
+## Austin Wang — `feat/gameplay-engine`
 
 - Create the branch.
 - Stub `SetupManager.ts`, `PlacementValidator.ts`, `ResourceManager.ts`, `VictoryManager.ts`, and `LongestRoadManager.ts`.
@@ -13,7 +13,7 @@
   - recompute VP / longest road / winner
 - Lock down the exact server-side legality rules before wiring UI.
 
-## Nathan Hu — `feat/demo2-contracts-realtime`
+## Nathan Hu — `feat/contracts-realtime`
 
 - Create the branch.
 - Update shared contracts for `CITY`, setup state, trade state, and the new Demo 2 actions.
@@ -21,7 +21,7 @@
 - Stub the new realtime handler branches in `registerSocketHandlers.ts`.
 - Add a reload path for `SYNC_GAME_STATE`.
 
-## Helena Clifford — `feat/demo2-firestore-live`
+## Helena Clifford — `feat/firestore-live`
 
 - Create the branch.
 - Verify Firebase Admin init works cleanly in local dev.
@@ -38,7 +38,7 @@
   - finish game
 - Decide how `RoomManager` reloads from Firestore when state is missing in memory.
 
-## Brandon Lee Felix — `feat/demo2-board-interactions`
+## Brandon Lee Felix — `feat/board-interactions`
 
 - Create the branch.
 - Add a clickable overlay layer on top of the rendered board.
@@ -46,7 +46,7 @@
 - Implement a basic hover state for valid vs invalid targets.
 - Get one clickable setup vertex and one clickable setup edge visually working first.
 
-## Emily Zhang — `feat/demo2-gameboard-ui`
+## Emily Zhang — `feat/gameboard-ui`
 
 - Create the branch.
 - Reserve layout space in `GameBoardScreen.ts` for:
@@ -58,7 +58,7 @@
 - Stub the UI components in `src/client/ui/`.
 - Make the screen ready to consume live resource, VP, and action state.
 
-## Barry Lu — `feat/demo2-trading`
+## Barry Lu — `feat/trading`
 
 - Create the branch.
 - Freeze the one-offer-at-a-time player trade flow with Nathan.
@@ -71,7 +71,7 @@
   - cancel trade
 - Define the minimum client trade state Emily will render.
 
-## James Huang — `feat/demo2-dice-timer`
+## James Huang — `feat/dice-timer`
 
 - Create the branch.
 - Stub `DiceManager.ts` and `TimerManager.ts`.
