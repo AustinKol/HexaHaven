@@ -1,6 +1,6 @@
 import type { ScreenId } from '../../shared/constants/screenIds';
-import type { ActionRejectedEvent, ClientRole } from '../../shared/types/socket';
-import type { GameState } from '../../shared/types/domain';
+import type { ActionRejectedEvent } from '../../shared/types/socket';
+import type { ClientRole, GameState } from '../../shared/types/domain';
 
 export interface ClientState {
   currentScreen: ScreenId | null;

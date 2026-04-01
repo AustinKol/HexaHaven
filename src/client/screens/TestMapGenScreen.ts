@@ -196,7 +196,7 @@ function pickTopBiome(scores: BiomeScores): BiomeType {
 }
 
 // Detail overlay drawing functions
-function drawOceanDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
+export function drawOceanDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
     for (let w = 0; w < 5; w++) {
         const wy = cy - sz * 0.4 + w * sz * 0.2;
         const alpha = 0.15 + w * 0.06;
@@ -220,7 +220,7 @@ function drawOceanDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number
     }
 }
 
-function drawBeachDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
+export function drawBeachDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
     for (let i = 0; i < 25; i++) {
         const dx = (seededRandom(q, r, i * 2) - 0.5) * sz * 1.4;
         const dy = (seededRandom(q, r, i * 2 + 1) - 0.5) * sz * 1.2;
@@ -240,7 +240,7 @@ function drawBeachDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number
     }
 }
 
-function drawDesertDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, _q: number, _r: number) {
+export function drawDesertDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, _q: number, _r: number) {
     for (let d = 0; d < 3; d++) {
         const baseY = cy + (d - 1) * sz * 0.28;
         g.lineStyle(1.2 + d * 0.3, d === 1 ? 0xb8a060 : 0xccb478, 0.3 + d * 0.05);
@@ -256,7 +256,7 @@ function drawDesertDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: numbe
     }
 }
 
-function drawSavannahDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
+export function drawSavannahDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
     for (let i = 0; i < 14; i++) {
         const dx = (seededRandom(q, r, i * 2) - 0.5) * sz * 1.3;
         const dy = (seededRandom(q, r, i * 2 + 1) - 0.5) * sz * 1.1;
@@ -274,7 +274,7 @@ function drawSavannahDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: num
     }
 }
 
-function drawForestDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
+export function drawForestDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
     for (let i = 0; i < 10; i++) {
         const dx = (seededRandom(q, r, i + 450) - 0.5) * sz * 1.3;
         const dy = (seededRandom(q, r, i + 460) - 0.5) * sz * 1.1;
@@ -306,7 +306,7 @@ function drawForestDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: numbe
     }
 }
 
-function drawJungleDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
+export function drawJungleDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
     for (let i = 0; i < 15; i++) {
         const dx = (seededRandom(q, r, i + 570) - 0.5) * sz * 1.3;
         const dy = (seededRandom(q, r, i + 580) - 0.5) * sz * 1.1;
@@ -329,7 +329,7 @@ function drawJungleDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: numbe
     }
 }
 
-function drawMountainDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
+export function drawMountainDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
     for (let i = 0; i < 12; i++) {
         const dx = (seededRandom(q, r, i + 650) - 0.5) * sz * 1.2;
         const dy = (seededRandom(q, r, i + 660) - 0.5) * sz;
@@ -354,7 +354,7 @@ function drawMountainDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: num
     }
 }
 
-function drawArcticDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
+export function drawArcticDetails(g: Phaser.GameObjects.Graphics, cx: number, cy: number, sz: number, q: number, r: number) {
     for (let i = 0; i < 6; i++) {
         const dx = (seededRandom(q, r, i + 700) - 0.5) * sz * 1.1;
         const dy = (seededRandom(q, r, i + 710) - 0.5) * sz * 0.9;

@@ -5,7 +5,6 @@ import type {
   AckError,
   ClientToServerEvents,
   CreateGameRequest,
-  JoinGameRequest,
   ServerToClientEvents,
   SocketAck,
   CreateGameAckData,
@@ -19,8 +18,7 @@ import { logger } from '../utils/logger';
 
 type TypedSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
 type SimpleActionAck = (response: SocketAck<SimpleActionAckData>) => void;
-type CreateGameAck = (response: SocketAck<CreateGameAckData>) => void;
-type JoinGameAck = (response: SocketAck<JoinGameAckData>) => void;
+type CreateOrJoinAck<T extends CreateGameAckData | JoinGameAckData> = (response: SocketAck<T>) => void;
 
 const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#F7B801'] as const;
 
@@ -182,9 +180,9 @@ function rejectAction(socket: TypedSocket, ack: SimpleActionAck, error: AckError
   ack({ ok: false, error });
 }
 
-function rejectCreateOrJoin(
+function rejectCreateOrJoin<T extends CreateGameAckData | JoinGameAckData>(
   socket: TypedSocket,
-  ack: CreateGameAck | JoinGameAck,
+  ack: CreateOrJoinAck<T>,
   error: AckError,
 ): void {
   socket.emit(SERVER_EVENTS.ACTION_REJECTED, {
@@ -192,7 +190,7 @@ function rejectCreateOrJoin(
     message: error.message,
     details: error.details,
   });
-  ack({ ok: false, error } as SocketAck<CreateGameAckData> | SocketAck<JoinGameAckData>);
+  ack({ ok: false, error });
 }
 
 function completeAction(
@@ -205,14 +203,14 @@ function completeAction(
   ack({ ok: true, data: { gameState } });
 }
 
-function completeCreateOrJoin(
+function completeCreateOrJoin<T extends CreateGameAckData | JoinGameAckData>(
   io: Server<ClientToServerEvents, ServerToClientEvents>,
   gameId: string,
-  payload: CreateGameAckData | JoinGameAckData,
-  ack: CreateGameAck | JoinGameAck,
+  payload: T,
+  ack: CreateOrJoinAck<T>,
 ): void {
   io.to(gameId).emit(SERVER_EVENTS.GAME_STATE_UPDATE, payload.gameState);
-  ack({ ok: true, data: payload } as SocketAck<CreateGameAckData> | SocketAck<JoinGameAckData>);
+  ack({ ok: true, data: payload });
 }
 
 export function registerSocketHandlers(
@@ -237,7 +235,7 @@ export function registerSocketHandlers(
 
     socket.on(CLIENT_EVENTS.CREATE_GAME, (request, ack) => {
       const displayName = typeof request.displayName === 'string' ? request.displayName.trim() : '';
-      const playerCount = resolvePlayerCount((request.config as Record<string, unknown> | null)?.playerCount);
+      const playerCount = resolvePlayerCount(request.config.playerCount);
 
       if (!displayName) {
         rejectCreateOrJoin(socket, ack, { code: 'INVALID_CONFIGURATION', message: 'Display name is required.' });
@@ -419,7 +417,20 @@ export function registerSocketHandlers(
 
       const existingGameState = roomManager.getGameState(gameId);
       const gameState = existingGameState
-        ?? roomManager.initializeGameState(gameId, buildInitialGameStateFromRoom(room));
+        ?? roomManager.initializeGameState(gameId, buildInitialGameStateFromRoom(room, {
+          displayName: room.players[0]?.name ?? 'Host',
+          config: {
+            playerCount: room.maxPlayers,
+            goalCount: 0,
+            winRule: 'ALL_GOALS_COMPLETE',
+            mapSeed: 0,
+            mapSize: 'small',
+            timerEnabled: false,
+            turnTimeSec: null,
+            allowReroll: false,
+            startingResources: cloneResources(),
+          },
+        }));
 
       if (!gameState) {
         rejectAction(socket, ack, {

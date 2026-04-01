@@ -6,7 +6,7 @@ export class MainMenuScreen {
   private container: HTMLElement | null = null;
   private navigate: ((screenId: ScreenId) => void) | null = null;
 
-  render(parentElement: HTMLElement, onComplete?: () => void, navigate?: (screenId: ScreenId) => void): void {
+  render(parentElement: HTMLElement, _onComplete?: () => void, navigate?: (screenId: ScreenId) => void): void {
     this.navigate = navigate || null;
     parentElement.innerHTML = '';
 
