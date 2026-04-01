@@ -79,24 +79,24 @@ const RESOURCE_BOX_CONFIG: {
 
 const RESOURCE_KEYS: ResourceKey[] = ['CRYSTAL', 'STONE', 'BLOOM', 'EMBER', 'GOLD'];
 
+const RESOURCE_LABELS: Record<ResourceKey, string> = {
+  CRYSTAL: 'Crystal',
+  STONE: 'Stone',
+  BLOOM: 'Bloom',
+  EMBER: 'Ember',
+  GOLD: 'Gold',
+};
+
+function costEntriesForRecipe(cost: ResourceBundle): { key: ResourceKey; count: number }[] {
+  return RESOURCE_KEYS.filter((k) => (cost[k] ?? 0) > 0).map((k) => ({ key: k, count: cost[k] ?? 0 }));
+}
+
+function playerCanAffordCost(inventory: ResourceBundle, cost: ResourceBundle): boolean {
+  return RESOURCE_KEYS.every((k) => (inventory[k] ?? 0) >= (cost[k] ?? 0));
+}
+
 function emptyResourceBundle(): ResourceBundle {
   return { CRYSTAL: 0, STONE: 0, BLOOM: 0, EMBER: 0, GOLD: 0 };
-}
-
-function resourceBundlesEqual(a: ResourceBundle, b: ResourceBundle): boolean {
-  return RESOURCE_KEYS.every((k) => (a[k] ?? 0) === (b[k] ?? 0));
-}
-
-/** True when selection equals `cost` (zeros elsewhere) and the player can pay that cost. */
-function isBuildOptionReady(
-  selection: ResourceBundle,
-  cost: ResourceBundle,
-  inventory: ResourceBundle,
-): boolean {
-  if (!resourceBundlesEqual(selection, cost)) {
-    return false;
-  }
-  return RESOURCE_KEYS.every((k) => (inventory[k] ?? 0) >= (cost[k] ?? 0));
 }
 
 function cloneGameState(gs: GameState): GameState {
@@ -105,9 +105,7 @@ function cloneGameState(gs: GameState): GameState {
 
 type BuildKind = 'ROAD' | 'SETTLEMENT' | 'CITY' | 'DEV_CARD';
 
-/**
- * Costs (selection must match): Road 1E+1St · Settlement 1E+1Bl+1St · City 3St+2Bl · Dev 2Cr+2Go
- */
+/** Costs (paid from inventory when you can afford): Road 1E+1St · Settlement 1E+1Bl+1St · City 3St+2Bl · Dev 2Cr+2Go */
 const BUILD_OPTIONS: { kind: BuildKind; label: string; cost: ResourceBundle; iconSrc?: string }[] = [
   {
     kind: 'ROAD',
@@ -161,7 +159,7 @@ export class GameBoardScreen {
   private resourceBarLeft: HTMLDivElement | null = null;
   /** Build actions (right side); rebuilt each refresh. */
   private resourceBarRight: HTMLDivElement | null = null;
-  /** Multiset of resources picked for a build (tap a resource to cycle 0…owned). */
+  /** Left bar: tap counts 0…owned (optional; build actions pay from inventory when you can afford). */
   private resourceSelection: ResourceBundle = emptyResourceBundle();
   private turnHudPanel: HTMLDivElement | null = null;
   private currentPlayerValue: HTMLDivElement | null = null;
@@ -173,6 +171,12 @@ export class GameBoardScreen {
   private isMusicMuted = false;
   private turnHudBindings: GameBoardTurnHudBindings | null = null;
   private unsubscribe: (() => void) | null = null;
+  private buildRecipePopoverEl: HTMLDivElement | null = null;
+  private buildRecipePopoverAnchor: HTMLElement | null = null;
+  private buildRecipePopoverListeners: { onDoc: (e: MouseEvent) => void; onKey: (e: KeyboardEvent) => void } | null =
+    null;
+  /** Chosen build; resources are spent after the player clicks the map to place. */
+  private pendingBuild: { kind: BuildKind; cost: ResourceBundle } | null = null;
   private liveGameState: GameState | null = null;
   private livePlayerId: string | null = null;
   private fallbackLastDiceRoll = 'Not rolled yet';
@@ -205,6 +209,7 @@ export class GameBoardScreen {
       compactFit: true,
       reservedBottomPx: GAME_BOARD_BOTTOM_BAR_PX,
       mapLiftPx: GAME_BOARD_MAP_LIFT_PX,
+      onMapPointerDown: () => this.handleMapPlaceClick(),
     });
     this.mapScreen.render(
       parentElement,
@@ -504,7 +509,7 @@ export class GameBoardScreen {
         count.textContent = owned > 0 ? `${selected}/${owned}` : '0';
         btn.appendChild(count);
 
-        this.resourceBarLeft.appendChild(btn);
+        this.resourceBarLeft?.appendChild(btn);
       },
     );
   }
@@ -539,10 +544,130 @@ export class GameBoardScreen {
     this.refreshPlayerUi();
   }
 
+  private dismissBuildRecipePopover(): void {
+    if (this.buildRecipePopoverListeners) {
+      document.removeEventListener('mousedown', this.buildRecipePopoverListeners.onDoc, true);
+      document.removeEventListener('keydown', this.buildRecipePopoverListeners.onKey);
+      this.buildRecipePopoverListeners = null;
+    }
+    if (this.buildRecipePopoverEl) {
+      this.buildRecipePopoverEl.remove();
+      this.buildRecipePopoverEl = null;
+    }
+    this.buildRecipePopoverAnchor = null;
+  }
+
+  private showBuildRecipePopover(
+    anchor: HTMLElement,
+    label: string,
+    cost: ResourceBundle,
+    inventory: ResourceBundle,
+  ): void {
+    this.dismissBuildRecipePopover();
+
+    const panel = document.createElement('div');
+    panel.className =
+      'font-hexahaven-ui pointer-events-auto max-w-[min(280px,calc(100vw-24px))] rounded-lg border border-slate-500 bg-slate-900/98 px-3 py-2.5 text-left text-white shadow-[0_8px_28px_rgba(0,0,0,0.55)]';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', `${label} recipe`);
+
+    const title = document.createElement('div');
+    title.className = 'font-semibold text-sm text-slate-100';
+    title.textContent = label;
+    panel.appendChild(title);
+
+    const warn = document.createElement('div');
+    warn.className =
+      'mt-2 rounded-md border border-amber-500/55 bg-amber-950/45 px-2 py-1.5 text-[11px] leading-snug text-amber-100';
+    warn.textContent =
+      "You can't build this yet — you don't have enough resources. Dimmed slots are what you're missing.";
+    panel.appendChild(warn);
+
+    const sub = document.createElement('div');
+    sub.className = 'mt-2 text-[11px] leading-snug text-slate-400';
+    sub.textContent =
+      'Bright = you have enough in your inventory for that resource; dim = need more.';
+    panel.appendChild(sub);
+
+    const row = document.createElement('div');
+    row.className = 'mt-2 flex flex-wrap items-center gap-2';
+    const entries = costEntriesForRecipe(cost);
+    entries.forEach(({ key, count }) => {
+      const owned = inventory[key] ?? 0;
+      const hasEnough = owned >= count;
+      const cfg = RESOURCE_BOX_CONFIG.find((c) => c.key === key);
+      const chip = document.createElement('div');
+      chip.className = hasEnough
+        ? 'flex items-center gap-1 rounded-md border border-emerald-400/90 bg-emerald-100/95 px-1.5 py-1 text-[11px] text-emerald-950 shadow-[0_0_10px_rgba(16,185,129,0.28)]'
+        : 'flex items-center gap-1 rounded-md border border-slate-600/90 bg-slate-900/90 px-1.5 py-1 text-[11px] text-slate-500 opacity-75';
+      if (cfg?.iconSrc) {
+        const img = document.createElement('img');
+        img.src = cfg.iconSrc;
+        img.alt = '';
+        img.className = hasEnough
+          ? 'h-6 w-6 object-contain'
+          : 'h-6 w-6 object-contain opacity-55 grayscale';
+        img.draggable = false;
+        chip.appendChild(img);
+      }
+      const text = document.createElement('span');
+      text.className = 'tabular-nums';
+      text.textContent = `${RESOURCE_LABELS[key]} ×${count}`;
+      chip.appendChild(text);
+      row.appendChild(chip);
+    });
+    panel.appendChild(row);
+
+    panel.addEventListener('mousedown', (e) => e.stopPropagation());
+    panel.addEventListener('click', (e) => e.stopPropagation());
+
+    document.body.appendChild(panel);
+    this.buildRecipePopoverEl = panel;
+    this.buildRecipePopoverAnchor = anchor;
+
+    const place = (): void => {
+      const rect = anchor.getBoundingClientRect();
+      const w = panel.offsetWidth;
+      const h = panel.offsetHeight;
+      let left = rect.left + rect.width / 2 - w / 2;
+      left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
+      let top = rect.top - 8 - h;
+      if (top < 8) {
+        top = rect.bottom + 8;
+      }
+      panel.style.position = 'fixed';
+      panel.style.left = `${left}px`;
+      panel.style.top = `${top}px`;
+      panel.style.zIndex = '100';
+    };
+    requestAnimationFrame(() => {
+      place();
+    });
+
+    const onDoc = (e: MouseEvent): void => {
+      if (panel.contains(e.target as Node) || anchor.contains(e.target as Node)) {
+        return;
+      }
+      this.dismissBuildRecipePopover();
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        this.dismissBuildRecipePopover();
+      }
+    };
+
+    this.buildRecipePopoverListeners = { onDoc, onKey };
+    setTimeout(() => {
+      document.addEventListener('mousedown', onDoc, true);
+      document.addEventListener('keydown', onKey);
+    }, 0);
+  }
+
   private renderBuildingBarFromGameState(): void {
     if (!this.resourceBarRight) {
       return;
     }
+    this.dismissBuildRecipePopover();
     this.resourceBarRight.innerHTML = '';
 
     const gameState = this.liveGameState ?? clientState.gameState;
@@ -557,8 +682,13 @@ export class GameBoardScreen {
 
     this.clampResourceSelectionToInventory(player.resources);
 
+    if (this.pendingBuild && !playerCanAffordCost(player.resources, this.pendingBuild.cost)) {
+      this.pendingBuild = null;
+    }
+
     BUILD_OPTIONS.forEach(({ kind, label, cost, iconSrc }) => {
-      const ready = isBuildOptionReady(this.resourceSelection, cost, player.resources);
+      const ready = playerCanAffordCost(player.resources, cost);
+      const selected = this.pendingBuild?.kind === kind;
 
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -567,13 +697,19 @@ export class GameBoardScreen {
       if (ready) {
         btn.className +=
           ' cursor-pointer border-emerald-400/80 bg-emerald-100 text-emerald-950 shadow-[0_0_14px_rgba(16,185,129,0.16)]';
-        btn.disabled = false;
+        if (selected) {
+          btn.className +=
+            ' ring-2 ring-cyan-400 ring-offset-2 ring-offset-slate-950 shadow-[0_0_16px_rgba(34,211,238,0.45)]';
+        }
       } else {
         btn.className +=
-          ' cursor-not-allowed border-slate-600 bg-slate-800/80 text-slate-500 opacity-70';
-        btn.disabled = true;
+          ' cursor-pointer border-slate-600 bg-slate-800/80 text-slate-400 opacity-90';
       }
-      btn.setAttribute('aria-label', label);
+      btn.disabled = false;
+      btn.setAttribute(
+        'aria-label',
+        selected && ready ? `${label} — selected, tap the map to place` : label,
+      );
       if (iconSrc) {
         const img = document.createElement('img');
         img.src = iconSrc;
@@ -582,21 +718,58 @@ export class GameBoardScreen {
         img.draggable = false;
         btn.appendChild(img);
       }
-      if (ready) {
-        btn.addEventListener('click', () => this.onBuildingClicked(kind, cost));
-      }
+      btn.addEventListener('click', () => {
+        if (ready) {
+          this.togglePendingBuild(kind, cost);
+        } else if (this.buildRecipePopoverEl && this.buildRecipePopoverAnchor === btn) {
+          this.dismissBuildRecipePopover();
+        } else {
+          this.showBuildRecipePopover(btn, label, cost, player.resources);
+        }
+      });
       this.resourceBarRight?.appendChild(btn);
     });
   }
 
-  private onBuildingClicked(_kind: BuildKind, cost: ResourceBundle): void {
+  private togglePendingBuild(kind: BuildKind, cost: ResourceBundle): void {
+    this.dismissBuildRecipePopover();
+    if (this.pendingBuild?.kind === kind) {
+      this.pendingBuild = null;
+    } else {
+      this.pendingBuild = { kind, cost };
+    }
+    this.refreshPlayerUi();
+  }
+
+  private handleMapPlaceClick(): void {
+    if (!this.pendingBuild) {
+      return;
+    }
+    const { kind, cost } = this.pendingBuild;
     const gs = this.liveGameState ?? clientState.gameState;
     const pid = this.livePlayerId;
     if (!gs || !pid) {
       return;
     }
     const p0 = gs.playersById[pid];
-    if (!p0 || !isBuildOptionReady(this.resourceSelection, cost, p0.resources)) {
+    if (!p0 || !playerCanAffordCost(p0.resources, cost)) {
+      this.pendingBuild = null;
+      this.refreshPlayerUi();
+      return;
+    }
+    this.pendingBuild = null;
+    this.applyBuildPurchase(kind, cost);
+  }
+
+  private applyBuildPurchase(_kind: BuildKind, cost: ResourceBundle): void {
+    this.dismissBuildRecipePopover();
+    const gs = this.liveGameState ?? clientState.gameState;
+    const pid = this.livePlayerId;
+    if (!gs || !pid) {
+      return;
+    }
+    const p0 = gs.playersById[pid];
+    if (!p0 || !playerCanAffordCost(p0.resources, cost)) {
       return;
     }
     const next = cloneGameState(gs);
@@ -733,6 +906,7 @@ export class GameBoardScreen {
   }
 
   destroy(): void {
+    this.dismissBuildRecipePopover();
     window.removeEventListener(SETTINGS_CHANGED_EVENT, this.onSettingsChanged);
     this.stopBackgroundMusic();
     if (this.unsubscribe) {
@@ -771,6 +945,7 @@ export class GameBoardScreen {
     this.mapScreen = null;
     this.liveGameState = null;
     this.livePlayerId = null;
+    this.pendingBuild = null;
     this.resourceSelection = emptyResourceBundle();
   }
 }
