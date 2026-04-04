@@ -1,6 +1,7 @@
-import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledMusicVolume } from '../audio/musicVolume';
+import { playBuildPlacementSound } from '../audio/buildSounds';
+import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledBoardMusicVolume } from '../audio/musicVolume';
 import { ClientEnv } from '../config/env';
-import { SETTINGS_CHANGED_EVENT } from '../settings/gameSettings';
+import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings } from '../settings/gameSettings';
 import { ScreenId } from '../../shared/constants/screenIds';
 import type { DiceRoll, GamePhase, GameState, ResourceBundle, StructureState, VertexLocation } from '../../shared/types/domain';
 import { connectSocket, endTurn, rollDice, syncGameState } from '../networking/socketClient';
@@ -174,6 +175,14 @@ export class GameBoardScreen {
   private readonly backgroundMusic = new Audio('/audio/game-board-theme.mp3');
   private exitButton: HTMLButtonElement | null = null;
   private musicToggleButton: HTMLButtonElement | null = null;
+  private settingsButton: HTMLButtonElement | null = null;
+  private gameSettingsBackdrop: HTMLDivElement | null = null;
+  private gameSettingsBoardMusicRange: HTMLInputElement | null = null;
+  private gameSettingsBoardMusicValueEl: HTMLElement | null = null;
+  private gameSettingsGameSfxRange: HTMLInputElement | null = null;
+  private gameSettingsGameSfxValueEl: HTMLElement | null = null;
+  private gameSettingsKeydown: ((e: KeyboardEvent) => void) | null = null;
+  private topRightContainer: HTMLElement | null = null;
   private playerPanel: HTMLDivElement | null = null;
   private resourceBar: HTMLDivElement | null = null;
   /** Player + resource buttons; cleared on each state refresh. */
@@ -202,7 +211,8 @@ export class GameBoardScreen {
   private livePlayerId: string | null = null;
   private fallbackLastDiceRoll = 'Not rolled yet';
   private readonly onSettingsChanged = (): void => {
-    this.backgroundMusic.volume = scaledMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
+    this.backgroundMusic.volume = scaledBoardMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
+    this.syncGameSettingsPanelSliders();
   };
 
   constructor() {
@@ -288,13 +298,39 @@ export class GameBoardScreen {
     }
     const navigateTo = navigate;
 
+    const topRight = document.createElement('div');
+    topRight.style.position = 'absolute';
+    topRight.style.top = '16px';
+    topRight.style.right = '16px';
+    topRight.style.zIndex = '3';
+    topRight.style.display = 'flex';
+    topRight.style.flexDirection = 'row';
+    topRight.style.alignItems = 'center';
+    topRight.style.gap = '8px';
+
+    this.settingsButton = document.createElement('button');
+    this.settingsButton.type = 'button';
+    this.settingsButton.className = 'font-hexahaven-ui';
+    this.settingsButton.style.display = 'flex';
+    this.settingsButton.style.alignItems = 'center';
+    this.settingsButton.style.justifyContent = 'center';
+    this.settingsButton.style.width = '40px';
+    this.settingsButton.style.height = '40px';
+    this.settingsButton.style.padding = '0';
+    this.settingsButton.style.color = '#ffffff';
+    this.settingsButton.style.background = 'rgba(15, 23, 42, 0.85)';
+    this.settingsButton.style.border = '1px solid rgba(255, 255, 255, 0.35)';
+    this.settingsButton.style.borderRadius = '8px';
+    this.settingsButton.style.cursor = 'pointer';
+    this.settingsButton.title = 'Game audio settings';
+    this.settingsButton.setAttribute('aria-label', 'Game audio settings');
+    this.settingsButton.innerHTML =
+      '<svg aria-hidden="true" viewBox="0 0 24 24" style="width:22px;height:22px;fill:currentColor;"><path d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.31-.09.63-.09.94s.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>';
+    this.settingsButton.addEventListener('click', () => this.toggleGameSettingsPanel());
+
     this.exitButton = document.createElement('button');
     this.exitButton.textContent = 'Exit to Menu';
     this.exitButton.className = 'font-hexahaven-ui';
-    this.exitButton.style.position = 'absolute';
-    this.exitButton.style.top = '16px';
-    this.exitButton.style.right = '16px';
-    this.exitButton.style.zIndex = '3';
     this.exitButton.style.padding = '8px 10px';
     this.exitButton.style.fontSize = '14px';
     this.exitButton.style.fontWeight = '600';
@@ -307,7 +343,10 @@ export class GameBoardScreen {
       clearLobbySession();
       navigateTo(ScreenId.MainMenu);
     });
-    this.buttonContainer.appendChild(this.exitButton);
+    topRight.appendChild(this.settingsButton);
+    topRight.appendChild(this.exitButton);
+    this.topRightContainer = topRight;
+    this.buttonContainer.appendChild(topRight);
 
     this.musicToggleButton = document.createElement('button');
     this.musicToggleButton.type = 'button';
@@ -1075,6 +1114,10 @@ export class GameBoardScreen {
       }
     }
 
+    if (kind === 'ROAD' || kind === 'SETTLEMENT' || kind === 'CITY') {
+      playBuildPlacementSound(kind);
+    }
+
     p.updatedAt = new Date().toISOString();
     this.resourceSelection = emptyResourceBundle();
     setClientState({ gameState: next });
@@ -1231,18 +1274,222 @@ export class GameBoardScreen {
     this.musicToggleButton.setAttribute('aria-label', isEnabled ? 'Stop music' : 'Start music');
   }
 
+  private toggleGameSettingsPanel(): void {
+    if (!this.gameSettingsBackdrop || this.gameSettingsBackdrop.style.display === 'none') {
+      this.openGameSettingsPanel();
+    } else {
+      this.closeGameSettingsPanel();
+    }
+  }
+
+  private openGameSettingsPanel(): void {
+    this.ensureGameSettingsPanel();
+    if (!this.gameSettingsBackdrop) {
+      return;
+    }
+    this.syncGameSettingsPanelSliders();
+    this.gameSettingsBackdrop.style.display = 'flex';
+    this.bindGameSettingsKeydown();
+  }
+
+  private closeGameSettingsPanel(): void {
+    if (this.gameSettingsBackdrop) {
+      this.gameSettingsBackdrop.style.display = 'none';
+    }
+    this.unbindGameSettingsKeydown();
+  }
+
+  private bindGameSettingsKeydown(): void {
+    if (this.gameSettingsKeydown) {
+      return;
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        this.closeGameSettingsPanel();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    this.gameSettingsKeydown = onKey;
+  }
+
+  private unbindGameSettingsKeydown(): void {
+    if (this.gameSettingsKeydown) {
+      document.removeEventListener('keydown', this.gameSettingsKeydown);
+      this.gameSettingsKeydown = null;
+    }
+  }
+
+  private syncGameSettingsPanelSliders(): void {
+    const s = loadSettings();
+    if (this.gameSettingsBoardMusicRange) {
+      this.gameSettingsBoardMusicRange.value = String(s.boardMusicVolume);
+    }
+    if (this.gameSettingsBoardMusicValueEl) {
+      this.gameSettingsBoardMusicValueEl.textContent = `${s.boardMusicVolume}%`;
+    }
+    if (this.gameSettingsGameSfxRange) {
+      this.gameSettingsGameSfxRange.value = String(s.gameSfxVolume);
+    }
+    if (this.gameSettingsGameSfxValueEl) {
+      this.gameSettingsGameSfxValueEl.textContent = `${s.gameSfxVolume}%`;
+    }
+  }
+
+  private applyGameSettingsPartial(partial: Partial<GameSettings>): void {
+    saveSettings({ ...loadSettings(), ...partial });
+  }
+
+  private ensureGameSettingsPanel(): void {
+    if (this.gameSettingsBackdrop) {
+      return;
+    }
+
+    const backdrop = document.createElement('div');
+    backdrop.style.display = 'none';
+    backdrop.style.position = 'fixed';
+    backdrop.style.inset = '0';
+    backdrop.style.zIndex = '100';
+    backdrop.style.background = 'rgba(15, 23, 42, 0.65)';
+    backdrop.style.alignItems = 'center';
+    backdrop.style.justifyContent = 'center';
+    backdrop.style.padding = '16px';
+
+    const panel = document.createElement('div');
+    panel.className = 'font-hexahaven-ui';
+    panel.style.maxWidth = '380px';
+    panel.style.width = '100%';
+    panel.style.background = 'rgba(15, 23, 42, 0.96)';
+    panel.style.border = '1px solid rgba(255, 255, 255, 0.25)';
+    panel.style.borderRadius = '12px';
+    panel.style.padding = '20px';
+    panel.style.boxShadow = '0 20px 50px rgba(0,0,0,0.45)';
+    panel.addEventListener('click', (e) => e.stopPropagation());
+
+    const title = document.createElement('h2');
+    title.style.margin = '0 0 12px 0';
+    title.style.fontSize = '18px';
+    title.style.fontWeight = '700';
+    title.style.color = '#ffffff';
+    title.textContent = 'Audio';
+
+    const row1 = this.createGameSettingsSliderRow('Board music', (range, valueEl) => {
+      this.gameSettingsBoardMusicRange = range;
+      this.gameSettingsBoardMusicValueEl = valueEl;
+      range.addEventListener('input', () => {
+        const v = Math.max(0, Math.min(100, Math.round(Number(range.value))));
+        valueEl.textContent = `${v}%`;
+        this.applyGameSettingsPartial({ boardMusicVolume: v });
+      });
+    });
+
+    const row2 = this.createGameSettingsSliderRow('Game sounds', (range, valueEl) => {
+      this.gameSettingsGameSfxRange = range;
+      this.gameSettingsGameSfxValueEl = valueEl;
+      range.addEventListener('input', () => {
+        const v = Math.max(0, Math.min(100, Math.round(Number(range.value))));
+        valueEl.textContent = `${v}%`;
+        this.applyGameSettingsPartial({ gameSfxVolume: v });
+      });
+    });
+
+    const closeRow = document.createElement('div');
+    closeRow.style.marginTop = '16px';
+    closeRow.style.display = 'flex';
+    closeRow.style.justifyContent = 'flex-end';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.textContent = 'Done';
+    closeBtn.style.padding = '8px 16px';
+    closeBtn.style.fontSize = '14px';
+    closeBtn.style.fontWeight = '600';
+    closeBtn.style.color = '#ffffff';
+    closeBtn.style.background = 'rgba(51, 65, 85, 0.95)';
+    closeBtn.style.border = '1px solid rgba(255, 255, 255, 0.35)';
+    closeBtn.style.borderRadius = '8px';
+    closeBtn.style.cursor = 'pointer';
+    closeBtn.addEventListener('click', () => this.closeGameSettingsPanel());
+
+    closeRow.appendChild(closeBtn);
+
+    panel.appendChild(title);
+    panel.appendChild(row1);
+    panel.appendChild(row2);
+    panel.appendChild(closeRow);
+
+    backdrop.appendChild(panel);
+    backdrop.addEventListener('click', () => this.closeGameSettingsPanel());
+
+    document.body.appendChild(backdrop);
+    this.gameSettingsBackdrop = backdrop;
+  }
+
+  private createGameSettingsSliderRow(
+    label: string,
+    wire: (range: HTMLInputElement, valueEl: HTMLElement) => void,
+  ): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.style.marginBottom = '12px';
+
+    const top = document.createElement('div');
+    top.style.display = 'flex';
+    top.style.justifyContent = 'space-between';
+    top.style.alignItems = 'baseline';
+    top.style.marginBottom = '6px';
+
+    const lab = document.createElement('span');
+    lab.style.fontSize = '13px';
+    lab.style.fontWeight = '600';
+    lab.style.color = '#fde68a';
+    lab.textContent = label;
+
+    const valueEl = document.createElement('span');
+    valueEl.style.fontSize = '13px';
+    valueEl.style.color = '#e2e8f0';
+    valueEl.textContent = '100%';
+
+    top.appendChild(lab);
+    top.appendChild(valueEl);
+
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = '0';
+    range.max = '100';
+    range.step = '5';
+    range.setAttribute('aria-label', label);
+    range.className = 'w-full h-2 cursor-pointer accent-sky-500 rounded-full bg-slate-700/80';
+    range.style.width = '100%';
+
+    wire(range, valueEl);
+
+    wrap.appendChild(top);
+    wrap.appendChild(range);
+    return wrap;
+  }
+
   destroy(): void {
     this.dismissBuildRecipePopover();
+    this.closeGameSettingsPanel();
+    if (this.gameSettingsBackdrop) {
+      this.gameSettingsBackdrop.remove();
+      this.gameSettingsBackdrop = null;
+    }
+    this.gameSettingsBoardMusicRange = null;
+    this.gameSettingsBoardMusicValueEl = null;
+    this.gameSettingsGameSfxRange = null;
+    this.gameSettingsGameSfxValueEl = null;
     window.removeEventListener(SETTINGS_CHANGED_EVENT, this.onSettingsChanged);
     this.stopBackgroundMusic();
     if (this.unsubscribe) {
       this.unsubscribe();
       this.unsubscribe = null;
     }
-    if (this.exitButton) {
-      this.exitButton.remove();
-      this.exitButton = null;
+    if (this.topRightContainer) {
+      this.topRightContainer.remove();
+      this.topRightContainer = null;
     }
+    this.exitButton = null;
+    this.settingsButton = null;
     if (this.musicToggleButton) {
       this.musicToggleButton.remove();
       this.musicToggleButton = null;

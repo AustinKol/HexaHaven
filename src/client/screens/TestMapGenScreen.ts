@@ -3,7 +3,7 @@ import { createNoise2D } from 'simplex-noise';
 import type { PlayerColorHue } from '../../shared/constants/playerColors';
 import { ownerColorToPlayerHue } from '../../shared/constants/playerColors';
 import { ScreenId } from '../../shared/constants/screenIds';
-import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledMusicVolume } from '../audio/musicVolume';
+import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledBoardMusicVolume } from '../audio/musicVolume';
 import { SETTINGS_CHANGED_EVENT } from '../settings/gameSettings';
 import { clearLobbySession } from '../state/lobbyState';
 
@@ -1591,7 +1591,7 @@ export class TestMapGenScreen {
     private readonly backgroundMusic = new Audio('/audio/game-board-theme.mp3');
     private isMusicMuted = false;
     private readonly onSettingsChanged = (): void => {
-        this.backgroundMusic.volume = scaledMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
+        this.backgroundMusic.volume = scaledBoardMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
     };
 
     constructor(options?: {
