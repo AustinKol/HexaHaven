@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { resolvePlayerColor } from '../../../shared/constants/playerColors';
 import { ApiRoutes } from '../../../shared/constants/apiRoutes';
 import type { ApiResponse, RoomSnapshot } from '../../../shared/types/api';
 import { defaultStartingResourceBundle } from '../../../shared/constants/startingResources';
@@ -28,8 +29,6 @@ interface LeaveRoomBody {
   
 }
 
-
-const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#F7B801'] as const;
 
 const EMPTY_STATS: PlayerStats = {
   publicVP: 0,
@@ -97,7 +96,7 @@ function buildInitialGameStateFromRoom(room: Room): GameState {
           userId: player.id,
           displayName: player.name,
           avatarUrl: player.avatar,
-          color: PLAYER_COLORS[index % PLAYER_COLORS.length],
+          color: resolvePlayerColor(room, index, null),
           isHost: player.id === room.hostId,
           resources: mapRoomResourcesToBundle(player.resources),
           goals: [],
