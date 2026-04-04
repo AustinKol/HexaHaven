@@ -1,3 +1,4 @@
+import { defaultStartingResourceBundle } from '../../shared/constants/startingResources';
 import type { GameState, ResourceBundle } from '../../shared/types/domain';
 import type { AckError } from '../../shared/types/socket';
 import { TurnManager } from './TurnManager';
@@ -6,14 +7,8 @@ export type EngineResult =
   | { ok: true; gameState: GameState }
   | { ok: false; error: AckError };
 
-/** One of each type — five resource units total per player when config starting hand is empty. */
-const DEFAULT_STARTING_HAND: ResourceBundle = {
-  CRYSTAL: 1,
-  STONE: 1,
-  BLOOM: 1,
-  EMBER: 1,
-  GOLD: 1,
-};
+/** Used when `config.startingResources` is all zeros (sum === 0). */
+const DEFAULT_STARTING_HAND: ResourceBundle = defaultStartingResourceBundle();
 
 function sumResourceBundle(bundle: ResourceBundle): number {
   return bundle.CRYSTAL + bundle.STONE + bundle.BLOOM + bundle.EMBER + bundle.GOLD;

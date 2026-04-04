@@ -1,4 +1,5 @@
 import type { Server, Socket } from 'socket.io';
+import { defaultStartingResourceBundle } from '../../shared/constants/startingResources';
 import { CLIENT_EVENTS, SERVER_EVENTS, SocketEvents } from '../../shared/constants/socketEvents';
 import type { GameState, PlayerStats, ResourceBundle } from '../../shared/types/domain';
 import type {
@@ -22,14 +23,6 @@ type CreateOrJoinAck<T extends CreateGameAckData | JoinGameAckData> = (response:
 
 const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#F7B801'] as const;
 
-const EMPTY_RESOURCES: ResourceBundle = {
-  CRYSTAL: 0,
-  STONE: 0,
-  BLOOM: 0,
-  EMBER: 0,
-  GOLD: 0,
-};
-
 const EMPTY_STATS: PlayerStats = {
   publicVP: 0,
   settlementsBuilt: 0,
@@ -40,10 +33,6 @@ const EMPTY_STATS: PlayerStats = {
   longestRoadLength: 0,
   turnsPlayed: 0,
 };
-
-function cloneResources(): ResourceBundle {
-  return { ...EMPTY_RESOURCES };
-}
 
 function cloneStats(): PlayerStats {
   return { ...EMPTY_STATS };
@@ -102,7 +91,7 @@ function createFallbackCreateGameRequest(room: Room): CreateGameRequest {
       timerEnabled: false,
       turnTimeSec: null,
       allowReroll: false,
-      startingResources: cloneResources(),
+      startingResources: defaultStartingResourceBundle(),
     },
   };
 }
@@ -375,7 +364,7 @@ export function registerSocketHandlers(
               timerEnabled: false,
               turnTimeSec: null,
               allowReroll: false,
-              startingResources: cloneResources(),
+              startingResources: defaultStartingResourceBundle(),
             },
           }),
       );

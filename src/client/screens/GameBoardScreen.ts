@@ -93,7 +93,7 @@ function costEntriesForRecipe(cost: ResourceBundle): { key: ResourceKey; count: 
 }
 
 function playerCanAffordCost(inventory: ResourceBundle, cost: ResourceBundle): boolean {
-  return RESOURCE_KEYS.every((k) => (inventory[k] ?? 0) >= (cost[k] ?? 0));
+  return RESOURCE_KEYS.every((k) => inventoryCount(inventory[k]) >= inventoryCount(cost[k]));
 }
 
 function canAffordCost(inventory: ResourceBundle, cost: ResourceBundle): boolean {
@@ -102,6 +102,12 @@ function canAffordCost(inventory: ResourceBundle, cost: ResourceBundle): boolean
 
 function emptyResourceBundle(): ResourceBundle {
   return { CRYSTAL: 0, STONE: 0, BLOOM: 0, EMBER: 0, GOLD: 0 };
+}
+
+/** Whole-number counts only (no decimals in UI or inventory math). */
+function inventoryCount(n: unknown): number {
+  const v = typeof n === 'number' && Number.isFinite(n) ? n : 0;
+  return Math.max(0, Math.floor(v));
 }
 
 function cloneGameState(gs: GameState): GameState {
@@ -498,8 +504,8 @@ export class GameBoardScreen {
 
     RESOURCE_BOX_CONFIG.forEach(
       ({ key, shortLabel, color, iconSrc, boxBg, boxBorder, boxHoverBg, countColor }) => {
-        const owned = player.resources[key] ?? 0;
-        const selected = this.resourceSelection[key] ?? 0;
+        const owned = inventoryCount(player.resources[key]);
+        const selected = inventoryCount(this.resourceSelection[key]);
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className =
@@ -515,7 +521,7 @@ export class GameBoardScreen {
         btn.addEventListener('mouseleave', () => {
           btn.style.backgroundColor = boxBg;
         });
-        btn.setAttribute('aria-label', `${key}: ${selected} selected of ${owned}`);
+        btn.setAttribute('aria-label', `${key}: ${owned}`);
         btn.addEventListener('click', () => this.cycleResourceSelection(key));
 
         if (iconSrc) {
@@ -536,7 +542,7 @@ export class GameBoardScreen {
         const count = document.createElement('span');
         count.className = 'text-[9px] font-semibold tabular-nums pointer-events-none leading-none';
         count.style.color = countColor;
-        count.textContent = owned > 0 ? `${selected}/${owned}` : '0';
+        count.textContent = String(owned);
         btn.appendChild(count);
 
         this.resourceBarLeft?.appendChild(btn);
@@ -546,8 +552,8 @@ export class GameBoardScreen {
 
   private clampResourceSelectionToInventory(inv: ResourceBundle): void {
     for (const k of RESOURCE_KEYS) {
-      const owned = inv[k] ?? 0;
-      const sel = this.resourceSelection[k] ?? 0;
+      const owned = inventoryCount(inv[k]);
+      const sel = inventoryCount(this.resourceSelection[k]);
       if (sel > owned) {
         this.resourceSelection = { ...this.resourceSelection, [k]: owned };
       }
@@ -564,11 +570,11 @@ export class GameBoardScreen {
     if (!player) {
       return;
     }
-    const owned = player.resources[key] ?? 0;
+    const owned = inventoryCount(player.resources[key]);
     if (owned <= 0) {
       return;
     }
-    const current = this.resourceSelection[key] ?? 0;
+    const current = inventoryCount(this.resourceSelection[key]);
     const next = (current + 1) % (owned + 1);
     this.resourceSelection = { ...this.resourceSelection, [key]: next };
     this.refreshPlayerUi();
@@ -858,6 +864,9 @@ export class GameBoardScreen {
       return;
     }
     const { kind, cost } = this.pendingBuild;
+    if (kind === 'DEV_CARD') {
+      return;
+    }
     const gs = this.liveGameState ?? clientState.gameState;
     const pid = this.livePlayerId;
     if (!gs || !pid) {
@@ -978,17 +987,8 @@ export class GameBoardScreen {
     if (!p) {
       return;
     }
-    if (!ClientEnv.devUnlimitedMaterials) {
-      for (const k of RESOURCE_KEYS) {
-        if ((p.resources[k] ?? 0) < (cost[k] ?? 0)) {
-          return;
-        }
-      }
-      for (const k of RESOURCE_KEYS) {
-        p.resources[k] = (p.resources[k] ?? 0) - (cost[k] ?? 0);
-      }
-    }
 
+    let placed = false;
     if (kind === 'SETTLEMENT' && selectedVertex) {
       if (this.isVertexOccupied(next, selectedVertex.id)) {
         return;
@@ -997,6 +997,7 @@ export class GameBoardScreen {
       next.board.structuresById[settlement.structureId] = settlement;
       p.stats.settlementsBuilt = (p.stats.settlementsBuilt ?? 0) + 1;
       p.stats.publicVP = (p.stats.publicVP ?? 0) + 1;
+      placed = true;
     } else if (kind === 'CITY' && selectedVertex) {
       const existingKey = Object.keys(next.board.structuresById).find(
         (key) => {
@@ -1004,14 +1005,14 @@ export class GameBoardScreen {
           return s.type === 'SETTLEMENT' && s.vertex?.id === selectedVertex.id && s.ownerPlayerId === pid;
         }
       );
-      if (existingKey) {
-        const existing = next.board.structuresById[existingKey];
-        existing.type = 'GARDEN';
-        p.stats.citiesBuilt = (p.stats.citiesBuilt ?? 0) + 1;
-        p.stats.publicVP = (p.stats.publicVP ?? 0) + 1; // +1 VP existing settlement = 2 VP total
-      } else {
+      if (!existingKey) {
         return;
       }
+      const existing = next.board.structuresById[existingKey];
+      existing.type = 'GARDEN';
+      p.stats.citiesBuilt = (p.stats.citiesBuilt ?? 0) + 1;
+      p.stats.publicVP = (p.stats.publicVP ?? 0) + 1; // +1 VP existing settlement = 2 VP total
+      placed = true;
     } else if (kind === 'ROAD' && selectedEdgeId) {
       const roadExists = Object.values(next.board.structuresById).some(
         (s) => s.locationType === 'EDGE' && s.edge?.id === selectedEdgeId,
@@ -1022,6 +1023,22 @@ export class GameBoardScreen {
       const road = this.createRoadStructure(next, pid, cost, selectedEdgeId);
       next.board.structuresById[road.structureId] = road;
       p.stats.roadsBuilt = (p.stats.roadsBuilt ?? 0) + 1;
+      placed = true;
+    }
+
+    if (!placed) {
+      return;
+    }
+
+    if (!ClientEnv.devUnlimitedMaterials) {
+      for (const k of RESOURCE_KEYS) {
+        if (inventoryCount(p.resources[k]) < inventoryCount(cost[k])) {
+          return;
+        }
+      }
+      for (const k of RESOURCE_KEYS) {
+        p.resources[k] = inventoryCount(p.resources[k]) - inventoryCount(cost[k]);
+      }
     }
 
     p.updatedAt = new Date().toISOString();
