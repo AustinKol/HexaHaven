@@ -12,6 +12,7 @@ import type {
   JoinGameAckData,
   SimpleActionAckData,
 } from '../../shared/types/socket';
+import { resolvePlayerColor } from '../../shared/constants/playerColors';
 import { GameEngine } from '../engine/GameEngine';
 import type { Room } from '../sessions/Room';
 import { roomManager } from '../sessions/roomManagerSingleton';
@@ -20,8 +21,6 @@ import { logger } from '../utils/logger';
 type TypedSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
 type SimpleActionAck = (response: SocketAck<SimpleActionAckData>) => void;
 type CreateOrJoinAck<T extends CreateGameAckData | JoinGameAckData> = (response: SocketAck<T>) => void;
-
-const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#F7B801'] as const;
 
 const EMPTY_STATS: PlayerStats = {
   publicVP: 0,
@@ -107,7 +106,7 @@ function buildInitialGameStateFromRoom(room: Room, request: CreateGameRequest): 
         userId: player.id,
         displayName: player.name,
         avatarUrl: player.avatar,
-        color: PLAYER_COLORS[index % PLAYER_COLORS.length],
+        color: resolvePlayerColor(room, index, null),
         isHost: player.id === room.hostId,
         resources: mapRoomResourcesToBundle(player.resources),
         goals: [],
@@ -336,7 +335,7 @@ export function registerSocketHandlers(
                   userId: player.id,
                   displayName: player.name,
                   avatarUrl: player.avatar,
-                  color: PLAYER_COLORS[index % PLAYER_COLORS.length],
+                  color: resolvePlayerColor(joined.room, index, existingGameState?.playersById[player.id]),
                   isHost: player.id === joined.room.hostId,
                   resources: mapRoomResourcesToBundle(player.resources),
                   goals: [],

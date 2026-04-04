@@ -22,4 +22,6 @@ export interface Room {
   players: RoomPlayer[];
   status: RoomStatus;
   maxPlayers: number;
+  /** Random permutation of PLAYER_COLOR_PALETTE; stable for the room lifetime. */
+  playerColorOrder: string[];
 }

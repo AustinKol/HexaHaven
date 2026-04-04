@@ -1,3 +1,4 @@
+import { shufflePlayerColorOrder } from '../../shared/constants/playerColors';
 import type { Room, RoomPlayer } from './Room';
 import type { GameState } from '../../shared/types/domain';
 
@@ -29,6 +30,7 @@ export class RoomManager {
       players: [hostPlayer],
       status: 'waiting',
       maxPlayers: maxPlayers ?? MAX_PLAYERS_PER_ROOM,
+      playerColorOrder: shufflePlayerColorOrder(),
     };
     this.rooms.set(roomId, room);
     return { room, player: hostPlayer };

@@ -92,6 +92,16 @@ function costEntriesForRecipe(cost: ResourceBundle): { key: ResourceKey; count: 
   return RESOURCE_KEYS.filter((k) => (cost[k] ?? 0) > 0).map((k) => ({ key: k, count: cost[k] ?? 0 }));
 }
 
+/** Parses `#rgb` / `#rrggbb` for UI accents (player panel borders, etc.). */
+function hexToRgbComponents(hex: string): { r: number; g: number; b: number } | null {
+  const h = hex.replace(/^#/, '').trim();
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  if (full.length !== 6) return null;
+  const n = parseInt(full, 16);
+  if (!Number.isFinite(n)) return null;
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
 function playerCanAffordCost(inventory: ResourceBundle, cost: ResourceBundle): boolean {
   return RESOURCE_KEYS.every((k) => inventoryCount(inventory[k]) >= inventoryCount(cost[k]));
 }
@@ -214,6 +224,19 @@ export class GameBoardScreen {
 
     const gameState = this.liveGameState ?? clientState.gameState;
     const structures = gameState ? Object.values(gameState.board.structuresById) : [];
+    const pendingKind =
+      this.pendingBuild?.kind === 'SETTLEMENT'
+        ? 'SETTLEMENT'
+        : this.pendingBuild?.kind === 'CITY'
+          ? 'CITY'
+          : this.pendingBuild?.kind === 'ROAD'
+            ? 'ROAD'
+            : null;
+    const livePid = this.livePlayerId;
+    const roadHoverColor =
+      pendingKind === 'ROAD' && livePid && gameState?.playersById[livePid]?.color
+        ? gameState.playersById[livePid].color
+        : undefined;
 
     this.mapScreen = new TestMapGenScreen({
       showExitButton: false,
@@ -225,7 +248,8 @@ export class GameBoardScreen {
       reservedBottomPx: GAME_BOARD_BOTTOM_BAR_PX,
       mapLiftPx: GAME_BOARD_MAP_LIFT_PX,
       onMapPointerDown: (hit) => this.handleMapPlaceClick(hit),
-      pendingBuildKind: this.pendingBuild?.kind === 'SETTLEMENT' ? 'SETTLEMENT' : this.pendingBuild?.kind === 'CITY' ? 'CITY' : this.pendingBuild?.kind === 'ROAD' ? 'ROAD' : null,
+      pendingBuildKind: pendingKind,
+      roadHoverColor,
       structures: structures.map(s => ({
         type: s.type === 'GARDEN' ? 'CITY' : (s.type as 'SETTLEMENT' | 'ROAD'),
         ownerColor: s.ownerColor,
@@ -461,7 +485,17 @@ export class GameBoardScreen {
       }
 
       const card = document.createElement('div');
-      card.className = 'rounded-lg border border-slate-500 bg-slate-900/85 px-2 py-2 text-white shadow-md';
+      card.className = 'font-hexahaven-ui rounded-lg border-2 border-solid px-2 py-2 text-white shadow-md';
+      const accent = player.color || '#94a3b8';
+      card.style.borderColor = accent;
+      const rgb = hexToRgbComponents(accent);
+      if (rgb) {
+        // Interior is mostly their color, mixed with slate so labels stay legible.
+        card.style.background = `color-mix(in srgb, ${accent} 72%, rgb(15, 23, 42))`;
+        card.style.boxShadow = `0 2px 12px rgba(${rgb.r},${rgb.g},${rgb.b},0.45)`;
+      } else {
+        card.classList.add('bg-slate-900/85');
+      }
 
       const avatar = document.createElement('img');
       avatar.src = player.avatarUrl ?? '/avatar/avatar_1.png';
@@ -1063,7 +1097,12 @@ export class GameBoardScreen {
     
     const structures = Object.values(gameState.board.structuresById);
     const pendingBuildKind = this.pendingBuild?.kind === 'SETTLEMENT' ? 'SETTLEMENT' : this.pendingBuild?.kind === 'CITY' ? 'CITY' : this.pendingBuild?.kind === 'ROAD' ? 'ROAD' : null;
-    
+    const pid = this.livePlayerId;
+    const roadHoverColor =
+      pendingBuildKind === 'ROAD' && pid && gameState.playersById[pid]?.color
+        ? gameState.playersById[pid].color
+        : undefined;
+
     const scene = this.mapScreen.getPhaser3Scene?.();
     if (scene) {
       scene.updateMap(
@@ -1073,7 +1112,8 @@ export class GameBoardScreen {
           ownerColor: s.ownerColor,
           vertex: s.vertex,
           edge: s.edge,
-        }))
+        })),
+        roadHoverColor,
       );
     }
   }

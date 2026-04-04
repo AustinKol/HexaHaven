@@ -1,5 +1,7 @@
 import Phaser, { Scene } from 'phaser';
 import { createNoise2D } from 'simplex-noise';
+import type { PlayerColorHue } from '../../shared/constants/playerColors';
+import { ownerColorToPlayerHue } from '../../shared/constants/playerColors';
 import { ScreenId } from '../../shared/constants/screenIds';
 import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledMusicVolume } from '../audio/musicVolume';
 import { SETTINGS_CHANGED_EVENT } from '../settings/gameSettings';
@@ -21,6 +23,16 @@ interface MapGenSceneOptions {
     pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null;
     /** Placed structures to render on map */
     structures?: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>;
+    /** Edge highlight color while placing a road (local player's assigned color). */
+    roadHoverColor?: string;
+}
+
+function cssHexToPhaserColor(hex: string): number {
+    const h = hex.trim().replace(/^#/, '');
+    if (h.length === 6) {
+        return parseInt(h, 16);
+    }
+    return 0x808080;
 }
 
 export interface MapPointerVertexHit {
@@ -790,6 +802,7 @@ export class MapGenTest extends Scene {
     private hoveredEdgeId: string | null = null;
     private pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null;
     private structures: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>;
+    private roadHoverColor?: string;
 
     constructor(options?: MapGenSceneOptions) {
         super('MapGenTest');
@@ -799,6 +812,7 @@ export class MapGenTest extends Scene {
         this.onMapPointerDown = options?.onMapPointerDown;
         this.pendingBuildKind = options?.pendingBuildKind;
         this.structures = options?.structures ?? [];
+        this.roadHoverColor = options?.roadHoverColor;
         if (this.compactFit) {
             this.hexSize = 34;
             this.mapZoom = 1;
@@ -816,15 +830,16 @@ export class MapGenTest extends Scene {
             }
         });
         
-        // Load building assets
-        if (!this.textures.exists('settlement-img')) {
-            this.load.image('settlement-img', '/images/buildings/settlement.png');
-        }
-        if (!this.textures.exists('city-img')) {
-            this.load.image('city-img', '/images/buildings/city.png');
-        }
-        if (!this.textures.exists('road-img')) {
-            this.load.image('road-img', '/images/buildings/road.png');
+        const buildingHues: PlayerColorHue[] = ['red', 'green', 'blue', 'yellow'];
+        for (const hue of buildingHues) {
+            const settlementKey = `settlement-${hue}`;
+            if (!this.textures.exists(settlementKey)) {
+                this.load.image(settlementKey, `/images/buildings/settlement-${hue}.png`);
+            }
+            const cityKey = `city-${hue}`;
+            if (!this.textures.exists(cityKey)) {
+                this.load.image(cityKey, `/images/buildings/city-${hue}.png`);
+            }
         }
     }
 
@@ -1428,8 +1443,12 @@ export class MapGenTest extends Scene {
                         const ex2 = p.x + sz * Math.cos(angle2);
                         const ey2 = p.y + sz * Math.sin(angle2);
                         
-                        // Draw a bright line for the edge
-                        this.hoverGraphics.lineStyle(5, 0x4ade80, 0.9);
+                        // Edge highlight: local player's road color when placing a road, else green
+                        const edgeLineColor =
+                            this.pendingBuildKind === 'ROAD' && this.roadHoverColor
+                                ? cssHexToPhaserColor(this.roadHoverColor)
+                                : 0x4ade80;
+                        this.hoverGraphics.lineStyle(5, edgeLineColor, 0.9);
                         this.hoverGraphics.beginPath();
                         this.hoverGraphics.moveTo(ex1, ey1);
                         this.hoverGraphics.lineTo(ex2, ey2);
@@ -1467,11 +1486,14 @@ export class MapGenTest extends Scene {
                             const vx = p.x + sz * Math.cos(angle);
                             const vy = p.y + sz * Math.sin(angle);
                             
-                            // Create structure image
-                            const imgKey = struct.type === 'CITY' ? 'city-img' : 'settlement-img';
+                            const hue = ownerColorToPlayerHue(struct.ownerColor);
+                            const imgKey = struct.type === 'CITY' ? `city-${hue}` : `settlement-${hue}`;
                             const structImg = this.add.image(vx, vy, imgKey);
-                            structImg.setScale(sz * 0.001); // Scale based on hex size
-                            structImg.setTint(parseInt(struct.ownerColor.slice(1), 16));
+                            const tex = this.textures.get(imgKey);
+                            const frame = tex.get();
+                            const targetMax = (sz * 1.15) / 2;
+                            const scale = targetMax / Math.max(frame.width, frame.height);
+                            structImg.setScale(scale);
                             structImg.setDepth(struct.type === 'CITY' ? 5 : 4);
                             this.structuresContainer?.add(structImg);
                             this.structureImages.set(vertexId, structImg);
@@ -1497,9 +1519,8 @@ export class MapGenTest extends Scene {
                             const ex2 = p.x + sz * Math.cos(angle2);
                             const ey2 = p.y + sz * Math.sin(angle2);
                             
-                            // Draw grey road line
                             const roadGraphics = this.add.graphics();
-                            roadGraphics.lineStyle(5, 0x808080, 1); // Grey line
+                            roadGraphics.lineStyle(5, cssHexToPhaserColor(struct.ownerColor), 1);
                             roadGraphics.lineBetween(ex1, ey1, ex2, ey2);
                             roadGraphics.setDepth(3); // Below settlements/cities at depth 4
                             this.structuresContainer?.add(roadGraphics);
@@ -1515,12 +1536,23 @@ export class MapGenTest extends Scene {
         this.structuresContainer.sort('depth');
     }
 
-    updateMap(pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null, structures?: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>): void {
+    updateMap(
+        pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null,
+        structures?: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>,
+        roadHoverColor?: string,
+    ): void {
         if (pendingBuildKind !== undefined) {
             this.pendingBuildKind = pendingBuildKind;
         }
         if (structures !== undefined) {
             this.structures = structures;
+        }
+        if (pendingBuildKind !== undefined) {
+            if (this.pendingBuildKind === 'ROAD') {
+                this.roadHoverColor = roadHoverColor;
+            } else {
+                this.roadHoverColor = undefined;
+            }
         }
         this.redrawHover();
         this.renderStructures();
@@ -1554,6 +1586,7 @@ export class TestMapGenScreen {
     private readonly onMapPointerDown?: (hit: MapPointerHit) => void;
     private readonly pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null;
     private readonly structures: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>;
+    private readonly roadHoverColor?: string;
     private onWindowResize: (() => void) | null = null;
     private readonly backgroundMusic = new Audio('/audio/game-board-theme.mp3');
     private isMusicMuted = false;
@@ -1574,6 +1607,7 @@ export class TestMapGenScreen {
         onMapPointerDown?: (hit: MapPointerHit) => void;
         pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null;
         structures?: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>;
+        roadHoverColor?: string;
     }) {
         this.showExitButton = options?.showExitButton ?? true;
         this.enableBackgroundMusic = options?.enableBackgroundMusic ?? true;
@@ -1586,6 +1620,7 @@ export class TestMapGenScreen {
         this.onMapPointerDown = options?.onMapPointerDown;
         this.pendingBuildKind = options?.pendingBuildKind;
         this.structures = options?.structures ?? [];
+        this.roadHoverColor = options?.roadHoverColor;
         this.backgroundMusic.loop = true;
         this.onSettingsChanged();
     }
@@ -1726,6 +1761,7 @@ export class TestMapGenScreen {
                 onMapPointerDown: this.onMapPointerDown,
                 pendingBuildKind: this.pendingBuildKind,
                 structures: this.structures,
+                roadHoverColor: this.roadHoverColor,
             })],
             scale: {
                 mode: Phaser.Scale.FIT,
