@@ -17,6 +17,7 @@ export const CLIENT_EVENTS = {
   START_GAME: 'START_GAME',
   ROLL_DICE: 'ROLL_DICE',
   END_TURN: 'END_TURN',
+  SYNC_GAME_STATE: 'SYNC_GAME_STATE',
 } as const;
 
 /** Server -> Client application events. */

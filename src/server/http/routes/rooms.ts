@@ -33,6 +33,7 @@ const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#F7B801'] as const;
 const EMPTY_STATS: PlayerStats = {
   publicVP: 0,
   settlementsBuilt: 0,
+  citiesBuilt: 0,
   roadsBuilt: 0,
   totalResourcesCollected: 0,
   totalResourcesSpent: 0,

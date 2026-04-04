@@ -33,6 +33,7 @@ const EMPTY_RESOURCES: ResourceBundle = {
 const EMPTY_STATS: PlayerStats = {
   publicVP: 0,
   settlementsBuilt: 0,
+  citiesBuilt: 0,
   roadsBuilt: 0,
   totalResourcesCollected: 0,
   totalResourcesSpent: 0,
@@ -563,6 +564,52 @@ export function registerSocketHandlers(
         rejectAction(socket, ack, {
           code: 'SESSION_NOT_FOUND',
           message: 'Unable to store game state for END_TURN.',
+        });
+        return;
+      }
+
+      completeAction(io, gameId, updatedGameState, ack);
+    });
+
+    socket.on(CLIENT_EVENTS.SYNC_GAME_STATE, (request, ack) => {
+      const normalizedGameId = normalizeId((request as any).gameId);
+      if (normalizedGameId === null) {
+        rejectAction(socket, ack, {
+          code: 'INVALID_CONFIGURATION',
+          message: 'Game id is required.',
+        });
+        return;
+      }
+      const gameId = normalizedGameId.toUpperCase();
+
+      const gameState = roomManager.getGameState(gameId);
+      if (!gameState) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Session not found for SYNC_GAME_STATE.',
+        });
+        return;
+      }
+
+      const playerId = resolvePlayerId(socket, gameState);
+      if (playerId === null) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Player session not found for SYNC_GAME_STATE.',
+        });
+        return;
+      }
+
+      const incomingState = (request as any).gameState;
+      const updatedGameState: GameState = {
+        ...incomingState,
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (!roomManager.setGameState(gameId, updatedGameState)) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Unable to store game state for SYNC_GAME_STATE.',
         });
         return;
       }

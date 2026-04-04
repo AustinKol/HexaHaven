@@ -56,6 +56,11 @@ export interface EndTurnRequest {
   gameId: string;
 }
 
+export interface SyncGameStateRequest {
+  gameId: string;
+  gameState: GameState;
+}
+
 // ─── Server -> Client ack data ───────────────────────────────────────
 
 export interface CreateGameAckData {
@@ -108,6 +113,10 @@ export interface ClientToServerEvents {
   ) => void;
   END_TURN: (
     request: EndTurnRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  SYNC_GAME_STATE: (
+    request: SyncGameStateRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,
   ) => void;
 }
