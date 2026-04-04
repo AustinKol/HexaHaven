@@ -55,6 +55,7 @@ export interface PresenceInfo {
 export interface PlayerStats {
   publicVP: number;
   settlementsBuilt: number;
+  citiesBuilt: number;
   roadsBuilt: number;
   totalResourcesCollected: number;
   totalResourcesSpent: number;

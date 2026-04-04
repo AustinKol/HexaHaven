@@ -116,3 +116,10 @@ export async function endTurn(gameId: string): Promise<SimpleActionAckData> {
     s.emit('END_TURN', { gameId }, ack);
   });
 }
+
+export async function syncGameState(gameId: string, gameState: any): Promise<SimpleActionAckData> {
+  const s = connectSocket({ gameId });
+  return emitWithAck<SimpleActionAckData>((ack) => {
+    s.emit('SYNC_GAME_STATE', { gameId, gameState }, ack);
+  });
+}

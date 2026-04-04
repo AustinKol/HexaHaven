@@ -1,5 +1,5 @@
 import { ScreenId } from '../../shared/constants/screenIds';
-import type { ResourceBundle } from '../../shared/types/domain';
+import { defaultStartingResourceBundle } from '../../shared/constants/startingResources';
 import { createGame } from '../networking/socketClient';
 import { setLobbySession } from '../state/lobbyState';
 import { createMusicToggleButton } from '../ui/musicToggleButton';
@@ -72,7 +72,6 @@ export class HostGameScreen {
       errorText.textContent = '';
 
       try {
-        const startingResources: ResourceBundle = { CRYSTAL: 0, STONE: 0, BLOOM: 0, EMBER: 0, GOLD: 0 };
         const ack = await createGame({
           displayName: name,
           config: {
@@ -84,7 +83,7 @@ export class HostGameScreen {
             timerEnabled: false,
             turnTimeSec: null,
             allowReroll: false,
-            startingResources,
+            startingResources: defaultStartingResourceBundle(),
           },
         });
         setLobbySession({

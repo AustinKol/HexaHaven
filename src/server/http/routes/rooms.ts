@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { ApiRoutes } from '../../../shared/constants/apiRoutes';
 import type { ApiResponse, RoomSnapshot } from '../../../shared/types/api';
+import { defaultStartingResourceBundle } from '../../../shared/constants/startingResources';
 import type { GameState, PlayerStats, ResourceBundle, RoomStatus } from '../../../shared/types/domain';
 import { GameEngine } from '../../engine/GameEngine';
 import type { Room } from '../../sessions/Room';
@@ -33,6 +34,7 @@ const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#F7B801'] as const;
 const EMPTY_STATS: PlayerStats = {
   publicVP: 0,
   settlementsBuilt: 0,
+  citiesBuilt: 0,
   roadsBuilt: 0,
   totalResourcesCollected: 0,
   totalResourcesSpent: 0,
@@ -40,22 +42,10 @@ const EMPTY_STATS: PlayerStats = {
   turnsPlayed: 0,
 };
 
-const EMPTY_RESOURCES: ResourceBundle = {
-  CRYSTAL: 0,
-  STONE: 0,
-  BLOOM: 0,
-  EMBER: 0,
-  GOLD: 0,
-};
-
 const gameEngine = new GameEngine();
 
 function cloneStats(): PlayerStats {
   return { ...EMPTY_STATS };
-}
-
-function cloneResources(): ResourceBundle {
-  return { ...EMPTY_RESOURCES };
 }
 
 function mapRoomResourcesToBundle(resources: {
@@ -96,7 +86,7 @@ function buildInitialGameStateFromRoom(room: Room): GameState {
       timerEnabled: false,
       turnTimeSec: null,
       allowReroll: false,
-      startingResources: cloneResources(),
+      startingResources: defaultStartingResourceBundle(),
     },
     playerOrder,
     playersById: Object.fromEntries(

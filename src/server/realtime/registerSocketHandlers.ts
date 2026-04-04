@@ -1,4 +1,5 @@
 import type { Server, Socket } from 'socket.io';
+import { defaultStartingResourceBundle } from '../../shared/constants/startingResources';
 import { CLIENT_EVENTS, SERVER_EVENTS, SocketEvents } from '../../shared/constants/socketEvents';
 import type { GameState, PlayerStats, ResourceBundle } from '../../shared/types/domain';
 import type {
@@ -22,27 +23,16 @@ type CreateOrJoinAck<T extends CreateGameAckData | JoinGameAckData> = (response:
 
 const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#F7B801'] as const;
 
-const EMPTY_RESOURCES: ResourceBundle = {
-  CRYSTAL: 0,
-  STONE: 0,
-  BLOOM: 0,
-  EMBER: 0,
-  GOLD: 0,
-};
-
 const EMPTY_STATS: PlayerStats = {
   publicVP: 0,
   settlementsBuilt: 0,
+  citiesBuilt: 0,
   roadsBuilt: 0,
   totalResourcesCollected: 0,
   totalResourcesSpent: 0,
   longestRoadLength: 0,
   turnsPlayed: 0,
 };
-
-function cloneResources(): ResourceBundle {
-  return { ...EMPTY_RESOURCES };
-}
 
 function cloneStats(): PlayerStats {
   return { ...EMPTY_STATS };
@@ -101,7 +91,7 @@ function createFallbackCreateGameRequest(room: Room): CreateGameRequest {
       timerEnabled: false,
       turnTimeSec: null,
       allowReroll: false,
-      startingResources: cloneResources(),
+      startingResources: defaultStartingResourceBundle(),
     },
   };
 }
@@ -374,7 +364,7 @@ export function registerSocketHandlers(
               timerEnabled: false,
               turnTimeSec: null,
               allowReroll: false,
-              startingResources: cloneResources(),
+              startingResources: defaultStartingResourceBundle(),
             },
           }),
       );
@@ -563,6 +553,52 @@ export function registerSocketHandlers(
         rejectAction(socket, ack, {
           code: 'SESSION_NOT_FOUND',
           message: 'Unable to store game state for END_TURN.',
+        });
+        return;
+      }
+
+      completeAction(io, gameId, updatedGameState, ack);
+    });
+
+    socket.on(CLIENT_EVENTS.SYNC_GAME_STATE, (request, ack) => {
+      const normalizedGameId = normalizeId((request as any).gameId);
+      if (normalizedGameId === null) {
+        rejectAction(socket, ack, {
+          code: 'INVALID_CONFIGURATION',
+          message: 'Game id is required.',
+        });
+        return;
+      }
+      const gameId = normalizedGameId.toUpperCase();
+
+      const gameState = roomManager.getGameState(gameId);
+      if (!gameState) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Session not found for SYNC_GAME_STATE.',
+        });
+        return;
+      }
+
+      const playerId = resolvePlayerId(socket, gameState);
+      if (playerId === null) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Player session not found for SYNC_GAME_STATE.',
+        });
+        return;
+      }
+
+      const incomingState = (request as any).gameState;
+      const updatedGameState: GameState = {
+        ...incomingState,
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (!roomManager.setGameState(gameId, updatedGameState)) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Unable to store game state for SYNC_GAME_STATE.',
         });
         return;
       }

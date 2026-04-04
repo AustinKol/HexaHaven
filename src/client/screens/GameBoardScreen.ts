@@ -1,11 +1,12 @@
 import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledMusicVolume } from '../audio/musicVolume';
+import { ClientEnv } from '../config/env';
 import { SETTINGS_CHANGED_EVENT } from '../settings/gameSettings';
 import { ScreenId } from '../../shared/constants/screenIds';
-import type { DiceRoll, GamePhase, GameState, ResourceBundle } from '../../shared/types/domain';
-import { connectSocket, endTurn, rollDice } from '../networking/socketClient';
+import type { DiceRoll, GamePhase, GameState, ResourceBundle, StructureState, VertexLocation } from '../../shared/types/domain';
+import { connectSocket, endTurn, rollDice, syncGameState } from '../networking/socketClient';
 import { clientState, setClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
-import { TestMapGenScreen } from './TestMapGenScreen';
+import { TestMapGenScreen, type MapPointerHit } from './TestMapGenScreen';
 
 type ResourceKey = keyof ResourceBundle;
 
@@ -92,11 +93,21 @@ function costEntriesForRecipe(cost: ResourceBundle): { key: ResourceKey; count: 
 }
 
 function playerCanAffordCost(inventory: ResourceBundle, cost: ResourceBundle): boolean {
-  return RESOURCE_KEYS.every((k) => (inventory[k] ?? 0) >= (cost[k] ?? 0));
+  return RESOURCE_KEYS.every((k) => inventoryCount(inventory[k]) >= inventoryCount(cost[k]));
+}
+
+function canAffordCost(inventory: ResourceBundle, cost: ResourceBundle): boolean {
+  return ClientEnv.devUnlimitedMaterials || playerCanAffordCost(inventory, cost);
 }
 
 function emptyResourceBundle(): ResourceBundle {
   return { CRYSTAL: 0, STONE: 0, BLOOM: 0, EMBER: 0, GOLD: 0 };
+}
+
+/** Whole-number counts only (no decimals in UI or inventory math). */
+function inventoryCount(n: unknown): number {
+  const v = typeof n === 'number' && Number.isFinite(n) ? n : 0;
+  return Math.max(0, Math.floor(v));
 }
 
 function cloneGameState(gs: GameState): GameState {
@@ -200,6 +211,10 @@ export class GameBoardScreen {
     const session = getLobbySession();
     const roomId = session?.roomId ?? null;
     this.livePlayerId = session?.playerId ?? null;
+
+    const gameState = this.liveGameState ?? clientState.gameState;
+    const structures = gameState ? Object.values(gameState.board.structuresById) : [];
+
     this.mapScreen = new TestMapGenScreen({
       showExitButton: false,
       enableBackgroundMusic: false,
@@ -209,7 +224,14 @@ export class GameBoardScreen {
       compactFit: true,
       reservedBottomPx: GAME_BOARD_BOTTOM_BAR_PX,
       mapLiftPx: GAME_BOARD_MAP_LIFT_PX,
-      onMapPointerDown: () => this.handleMapPlaceClick(),
+      onMapPointerDown: (hit) => this.handleMapPlaceClick(hit),
+      pendingBuildKind: this.pendingBuild?.kind === 'SETTLEMENT' ? 'SETTLEMENT' : this.pendingBuild?.kind === 'CITY' ? 'CITY' : this.pendingBuild?.kind === 'ROAD' ? 'ROAD' : null,
+      structures: structures.map(s => ({
+        type: s.type === 'GARDEN' ? 'CITY' : (s.type as 'SETTLEMENT' | 'ROAD'),
+        ownerColor: s.ownerColor,
+        vertex: s.vertex,
+        edge: s.edge,
+      })),
     });
     this.mapScreen.render(
       parentElement,
@@ -345,9 +367,22 @@ export class GameBoardScreen {
     panel.style.zIndex = '3';
     panel.style.width = '230px';
 
+    const header = document.createElement('div');
+    header.className = 'mb-2 flex items-center justify-between gap-2';
+
     const title = document.createElement('div');
-    title.className = 'font-hexahaven-ui text-sm font-semibold mb-2';
+    title.className = 'font-hexahaven-ui text-sm font-semibold';
     title.textContent = 'Turn HUD (DEMO)';
+    header.appendChild(title);
+
+    if (ClientEnv.devUnlimitedMaterials) {
+      const devBadge = document.createElement('div');
+      devBadge.className =
+        'font-hexahaven-ui rounded border border-amber-300/80 bg-amber-200/95 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-950';
+      devBadge.textContent = 'DEV: Unlimited';
+      devBadge.setAttribute('aria-label', 'Developer mode: unlimited materials enabled');
+      header.appendChild(devBadge);
+    }
 
     const currentPlayerLabel = document.createElement('div');
     currentPlayerLabel.className = 'font-hexahaven-ui text-xs text-slate-300';
@@ -386,7 +421,7 @@ export class GameBoardScreen {
     actions.appendChild(rollDiceButton);
     actions.appendChild(endTurnButton);
 
-    panel.appendChild(title);
+    panel.appendChild(header);
     panel.appendChild(currentPlayerLabel);
     panel.appendChild(currentPlayerValue);
     panel.appendChild(currentPhaseLabel);
@@ -410,6 +445,7 @@ export class GameBoardScreen {
     this.renderPlayerCardsFromGameState();
     this.renderResourceBarFromGameState();
     this.renderBuildingBarFromGameState();
+    this.updateMapDisplay();
   }
 
   private renderPlayerCardsFromGameState(): void {
@@ -468,8 +504,8 @@ export class GameBoardScreen {
 
     RESOURCE_BOX_CONFIG.forEach(
       ({ key, shortLabel, color, iconSrc, boxBg, boxBorder, boxHoverBg, countColor }) => {
-        const owned = player.resources[key] ?? 0;
-        const selected = this.resourceSelection[key] ?? 0;
+        const owned = inventoryCount(player.resources[key]);
+        const selected = inventoryCount(this.resourceSelection[key]);
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className =
@@ -485,7 +521,7 @@ export class GameBoardScreen {
         btn.addEventListener('mouseleave', () => {
           btn.style.backgroundColor = boxBg;
         });
-        btn.setAttribute('aria-label', `${key}: ${selected} selected of ${owned}`);
+        btn.setAttribute('aria-label', `${key}: ${owned}`);
         btn.addEventListener('click', () => this.cycleResourceSelection(key));
 
         if (iconSrc) {
@@ -506,7 +542,7 @@ export class GameBoardScreen {
         const count = document.createElement('span');
         count.className = 'text-[9px] font-semibold tabular-nums pointer-events-none leading-none';
         count.style.color = countColor;
-        count.textContent = owned > 0 ? `${selected}/${owned}` : '0';
+        count.textContent = String(owned);
         btn.appendChild(count);
 
         this.resourceBarLeft?.appendChild(btn);
@@ -516,8 +552,8 @@ export class GameBoardScreen {
 
   private clampResourceSelectionToInventory(inv: ResourceBundle): void {
     for (const k of RESOURCE_KEYS) {
-      const owned = inv[k] ?? 0;
-      const sel = this.resourceSelection[k] ?? 0;
+      const owned = inventoryCount(inv[k]);
+      const sel = inventoryCount(this.resourceSelection[k]);
       if (sel > owned) {
         this.resourceSelection = { ...this.resourceSelection, [k]: owned };
       }
@@ -534,11 +570,11 @@ export class GameBoardScreen {
     if (!player) {
       return;
     }
-    const owned = player.resources[key] ?? 0;
+    const owned = inventoryCount(player.resources[key]);
     if (owned <= 0) {
       return;
     }
-    const current = this.resourceSelection[key] ?? 0;
+    const current = inventoryCount(this.resourceSelection[key]);
     const next = (current + 1) % (owned + 1);
     this.resourceSelection = { ...this.resourceSelection, [key]: next };
     this.refreshPlayerUi();
@@ -682,12 +718,12 @@ export class GameBoardScreen {
 
     this.clampResourceSelectionToInventory(player.resources);
 
-    if (this.pendingBuild && !playerCanAffordCost(player.resources, this.pendingBuild.cost)) {
+    if (this.pendingBuild && !canAffordCost(player.resources, this.pendingBuild.cost)) {
       this.pendingBuild = null;
     }
 
     BUILD_OPTIONS.forEach(({ kind, label, cost, iconSrc }) => {
-      const ready = playerCanAffordCost(player.resources, cost);
+      const ready = canAffordCost(player.resources, cost);
       const selected = this.pendingBuild?.kind === kind;
 
       const btn = document.createElement('button');
@@ -738,30 +774,204 @@ export class GameBoardScreen {
     } else {
       this.pendingBuild = { kind, cost };
     }
+    console.log('[Settlement] Toggle pending build:', this.pendingBuild);
     this.refreshPlayerUi();
+    this.updateMapDisplay();
   }
 
-  private handleMapPlaceClick(): void {
+  private isVertexOccupied(gs: GameState, vertexId: string): boolean {
+    return Object.values(gs.board.structuresById).some(
+      (s) => s.locationType === 'VERTEX' && s.vertex?.id === vertexId,
+    );
+  }
+
+  private createSettlementStructure(
+    gs: GameState,
+    playerId: string,
+    cost: ResourceBundle,
+    vertex: VertexLocation,
+  ): StructureState {
+    const owner = gs.playersById[playerId];
+    const structureId = `settlement:${playerId}:${vertex.id}`;
+    return {
+      structureId,
+      ownerPlayerId: playerId,
+      ownerName: owner?.displayName ?? playerId,
+      ownerColor: owner?.color ?? '#ffffff',
+      type: 'SETTLEMENT',
+      level: 1,
+      locationType: 'VERTEX',
+      vertex,
+      edge: null,
+      adjacentStructures: [],
+      adjacentTiles: vertex.adjacentHexes.map((h) => `${h.q},${h.r}`),
+      builtAtTurn: gs.turn.currentTurn,
+      builtAt: new Date().toISOString(),
+      cost,
+      roadPath: null,
+    };
+  }
+
+  private createRoadStructure(
+    gs: GameState,
+    playerId: string,
+    cost: ResourceBundle,
+    edgeId: string,
+  ): StructureState {
+    const owner = gs.playersById[playerId];
+    // Parse edge ID: format is "e:q,r,dir"
+    const edgeParts = edgeId.substring(2).split(',');
+    const q = parseInt(edgeParts[0], 10);
+    const r = parseInt(edgeParts[1], 10);
+    const dir = parseInt(edgeParts[2], 10);
+
+    // Hex neighbor directions (axial coordinates top-flat clockwise from bottom-right slant)
+    const HEX_DIRS: [number, number][] = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
+    
+    // Calculate adjacent hexes for this edge (the two hexes that share this edge)
+    const hex1 = { q, r };
+    const [dq, dr] = HEX_DIRS[dir];
+    const hex2 = { q: q + dq, r: r + dr };
+    
+    return {
+      structureId: `road:${playerId}:${edgeId}`,
+      ownerPlayerId: playerId,
+      ownerName: owner?.displayName ?? playerId,
+      ownerColor: owner?.color ?? '#ffffff',
+      type: 'ROAD',
+      level: 1,
+      locationType: 'EDGE',
+      vertex: null,
+      edge: {
+        id: edgeId,
+        hex: hex1,
+        dir,
+        adjacentHexes: [hex1, hex2],
+      },
+      adjacentStructures: [],
+      adjacentTiles: [],
+      builtAtTurn: gs.turn.currentTurn,
+      builtAt: new Date().toISOString(),
+      cost,
+      roadPath: null,
+    };
+  }
+
+  private handleMapPlaceClick(hit: MapPointerHit): void {
+    console.log('[Settlement] Map click:', hit);
     if (!this.pendingBuild) {
+      console.log('[Settlement] No pending build');
       return;
     }
     const { kind, cost } = this.pendingBuild;
+    if (kind === 'DEV_CARD') {
+      return;
+    }
     const gs = this.liveGameState ?? clientState.gameState;
     const pid = this.livePlayerId;
     if (!gs || !pid) {
+      console.log('[Settlement] Missing gameState or playerId');
       return;
     }
     const p0 = gs.playersById[pid];
-    if (!p0 || !playerCanAffordCost(p0.resources, cost)) {
-      this.pendingBuild = null;
+    if (!p0 || !canAffordCost(p0.resources, cost)) {
+      console.log('[Settlement] Cannot afford or player missing:', { canAfford: p0 ? canAffordCost(p0.resources, cost) : false, playerExists: !!p0 });
       this.refreshPlayerUi();
       return;
     }
+
+    let selectedVertex: VertexLocation | null = null;
+    let selectedEdgeId: string | null = null;
+
+    if (kind === 'SETTLEMENT') {
+      selectedVertex = hit.vertex;
+      console.log('[Settlement] Checking vertex:', { vertex: selectedVertex, occupied: selectedVertex ? this.isVertexOccupied(gs, selectedVertex.id) : 'N/A' });
+      if (!selectedVertex || this.isVertexOccupied(gs, selectedVertex.id)) {
+        console.log('[Settlement] Vertex blocked or missing');
+        return;
+      }
+    } else if (kind === 'CITY') {
+      selectedVertex = hit.vertex;
+      if (!selectedVertex) {
+        console.log('[City] Vertex missing');
+        return;
+      }
+      const existing = Object.values(gs.board.structuresById).find(
+        (s) => s.type === 'SETTLEMENT' && s.vertex?.id === selectedVertex!.id
+      );
+      if (!existing || existing.ownerPlayerId !== pid) {
+        console.log('[City] Must upgrade from an existing settlement you own');
+        return;
+      }
+    } else if (kind === 'ROAD') {
+      if (!hit.edge) {
+        console.log('[Road] No edge hit');
+        return;
+      }
+      selectedEdgeId = hit.edge.id;
+      const canPlaceRoad = this.canPlaceRoad(gs, pid, hit.edge);
+      console.log('[Road] Checking edge:', { edge: selectedEdgeId, canPlace: canPlaceRoad });
+      if (!canPlaceRoad) {
+        console.log('[Road] Edge cannot connect to settlement or road');
+        return;
+      }
+    }
+
     this.pendingBuild = null;
-    this.applyBuildPurchase(kind, cost);
+    console.log('[Settlement] Proceeding with placement');
+    this.applyBuildPurchase(kind, cost, selectedVertex, selectedEdgeId);
   }
 
-  private applyBuildPurchase(_kind: BuildKind, cost: ResourceBundle): void {
+  private canPlaceRoad(gs: GameState, playerId: string, edge: any): boolean {
+    const playerStructures = Object.values(gs.board.structuresById).filter(
+      (s) => s.ownerPlayerId === playerId,
+    );
+
+    // Get the two vertices at the endpoints of this edge
+    const vertexIds = edge.vertices.map((v: any) => v.id);
+    const vertexHits = edge.vertices; // Each has {id, hex, corner}
+
+    // Check if either endpoint has a player settlement or city
+    for (const vId of vertexIds) {
+      if (playerStructures.some((s) => s.locationType === 'VERTEX' && s.vertex?.id === vId)) {
+        return true;
+      }
+    }
+
+    // Check if any player roads connect to either endpoint
+    const playerRoads = playerStructures.filter((s) => s.type === 'ROAD' && s.edge);
+    const HEX_DIRS: [number, number][] = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
+
+    for (const road of playerRoads) {
+      if (!road.edge) continue;
+      const { hex: roadHex, dir: roadDir } = road.edge;
+
+      // Check each endpoint of the new road
+      for (const vhit of vertexHits) {
+        const { hex: vHex, corner: vCorner } = vhit;
+
+        // Check if road is in the same hex and touches this endpoint corner
+        if (roadHex.q === vHex.q && roadHex.r === vHex.r) {
+          const roadCorner1 = roadDir;
+          const roadCorner2 = (roadDir + 1) % 6;
+          if (roadCorner1 === vCorner || roadCorner2 === vCorner) {
+            return true;
+          }
+        }
+
+        // Check if road's adjacent hex contains this vertex
+        const [dq, dr] = HEX_DIRS[roadDir];
+        const roadAdjHex = { q: roadHex.q + dq, r: roadHex.r + dr };
+        if ((roadAdjHex.q === vHex.q && roadAdjHex.r === vHex.r)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private applyBuildPurchase(kind: BuildKind, cost: ResourceBundle, selectedVertex: VertexLocation | null = null, selectedEdgeId: string | null = null): void {
     this.dismissBuildRecipePopover();
     const gs = this.liveGameState ?? clientState.gameState;
     const pid = this.livePlayerId;
@@ -769,7 +979,7 @@ export class GameBoardScreen {
       return;
     }
     const p0 = gs.playersById[pid];
-    if (!p0 || !playerCanAffordCost(p0.resources, cost)) {
+    if (!p0 || !canAffordCost(p0.resources, cost)) {
       return;
     }
     const next = cloneGameState(gs);
@@ -777,19 +987,95 @@ export class GameBoardScreen {
     if (!p) {
       return;
     }
-    for (const k of RESOURCE_KEYS) {
-      if ((p.resources[k] ?? 0) < (cost[k] ?? 0)) {
+
+    let placed = false;
+    if (kind === 'SETTLEMENT' && selectedVertex) {
+      if (this.isVertexOccupied(next, selectedVertex.id)) {
         return;
       }
+      const settlement = this.createSettlementStructure(next, pid, cost, selectedVertex);
+      next.board.structuresById[settlement.structureId] = settlement;
+      p.stats.settlementsBuilt = (p.stats.settlementsBuilt ?? 0) + 1;
+      p.stats.publicVP = (p.stats.publicVP ?? 0) + 1;
+      placed = true;
+    } else if (kind === 'CITY' && selectedVertex) {
+      const existingKey = Object.keys(next.board.structuresById).find(
+        (key) => {
+          const s = next.board.structuresById[key];
+          return s.type === 'SETTLEMENT' && s.vertex?.id === selectedVertex.id && s.ownerPlayerId === pid;
+        }
+      );
+      if (!existingKey) {
+        return;
+      }
+      const existing = next.board.structuresById[existingKey];
+      existing.type = 'GARDEN';
+      p.stats.citiesBuilt = (p.stats.citiesBuilt ?? 0) + 1;
+      p.stats.publicVP = (p.stats.publicVP ?? 0) + 1; // +1 VP existing settlement = 2 VP total
+      placed = true;
+    } else if (kind === 'ROAD' && selectedEdgeId) {
+      const roadExists = Object.values(next.board.structuresById).some(
+        (s) => s.locationType === 'EDGE' && s.edge?.id === selectedEdgeId,
+      );
+      if (roadExists) {
+        return;
+      }
+      const road = this.createRoadStructure(next, pid, cost, selectedEdgeId);
+      next.board.structuresById[road.structureId] = road;
+      p.stats.roadsBuilt = (p.stats.roadsBuilt ?? 0) + 1;
+      placed = true;
     }
-    for (const k of RESOURCE_KEYS) {
-      p.resources[k] = (p.resources[k] ?? 0) - (cost[k] ?? 0);
+
+    if (!placed) {
+      return;
     }
+
+    if (!ClientEnv.devUnlimitedMaterials) {
+      for (const k of RESOURCE_KEYS) {
+        if (inventoryCount(p.resources[k]) < inventoryCount(cost[k])) {
+          return;
+        }
+      }
+      for (const k of RESOURCE_KEYS) {
+        p.resources[k] = inventoryCount(p.resources[k]) - inventoryCount(cost[k]);
+      }
+    }
+
     p.updatedAt = new Date().toISOString();
     this.resourceSelection = emptyResourceBundle();
     setClientState({ gameState: next });
     this.liveGameState = next;
+    
+    // Force synchronize with server to bypass the frozen Demo 1 scope
+    const roomId = getLobbySession()?.roomId ?? null;
+    if (roomId) {
+      void syncGameState(roomId, next);
+    }
+
     this.refreshPlayerUi();
+  }
+
+  private updateMapDisplay(): void {
+    if (!this.mapScreen) return;
+    
+    const gameState = this.liveGameState ?? clientState.gameState;
+    if (!gameState) return;
+    
+    const structures = Object.values(gameState.board.structuresById);
+    const pendingBuildKind = this.pendingBuild?.kind === 'SETTLEMENT' ? 'SETTLEMENT' : this.pendingBuild?.kind === 'CITY' ? 'CITY' : this.pendingBuild?.kind === 'ROAD' ? 'ROAD' : null;
+    
+    const scene = this.mapScreen.getPhaser3Scene?.();
+    if (scene) {
+      scene.updateMap(
+        pendingBuildKind,
+        structures.map(s => ({
+          type: s.type === 'GARDEN' ? 'CITY' : (s.type as 'SETTLEMENT' | 'ROAD'),
+          ownerColor: s.ownerColor,
+          vertex: s.vertex,
+          edge: s.edge,
+        }))
+      );
+    }
   }
 
   private updateTurnHud(): void {

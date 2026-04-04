@@ -16,7 +16,34 @@ interface MapGenSceneOptions {
     /** Smaller hexes + auto-fit camera so the full map fits in view (e.g. game board). */
     compactFit?: boolean;
     /** When set and `allowPointerRegenerate` is false, any map click invokes this (e.g. confirm build placement). */
-    onMapPointerDown?: () => void;
+    onMapPointerDown?: (hit: MapPointerHit) => void;
+    /** Pending build type ('SETTLEMENT', 'ROAD', or null) to control hover display */
+    pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null;
+    /** Placed structures to render on map */
+    structures?: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>;
+}
+
+export interface MapPointerVertexHit {
+    id: string;
+    hex: { q: number; r: number };
+    corner: number;
+    adjacentHexes: Array<{ q: number; r: number }>;
+}
+
+export interface MapPointerEdgeHit {
+    id: string;
+    hex: { q: number; r: number };
+    edge: number;
+    adjacentHex: { q: number; r: number };
+    vertices: Array<{ id: string; hex: { q: number; r: number }; corner: number }>;
+}
+
+export interface MapPointerHit {
+    worldX: number;
+    worldY: number;
+    hex: { q: number; r: number } | null;
+    vertex: MapPointerVertexHit | null;
+    edge: MapPointerEdgeHit | null;
 }
 
 // Rich color palettes per biome (sampled by noise for variation)
@@ -31,7 +58,8 @@ const BIOME_PALETTE: Record<BiomeType, number[]> = {
 const MAP_RADIUS: Record<MapSize, number> = { small: 1, medium: 2, large: 3 };
 const RESOURCE_BIOMES: BiomeType[] = ['STONE', 'BLOOM', 'EMBER', 'CRYSTAL', 'GOLD'];
 const TOKEN_POOL = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12];
-const HEX_DIRS: [number, number][] = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
+// Directions correctly ordered clockwise starting from 30° edge (bottom-right slope)
+const HEX_DIRS: [number, number][] = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
 const TEST_MAP_BUTTON_FONT_FAMILY = '04b_30';
 const TEST_MAP_BUTTON_FONT_URL = '/fonts/04b_30.ttf';
 
@@ -737,6 +765,7 @@ const BIOME_DETAIL: Record<BiomeType, (g: Phaser.GameObjects.Graphics, cx: numbe
     },
 };
 
+
 /** Multiply compact-fit zoom so the map can sit larger than the strict fit (1.5 = 50% bigger on screen). */
 const COMPACT_FIT_ZOOM_MULTIPLIER = 1.62;
 
@@ -752,8 +781,15 @@ export class MapGenTest extends Scene {
     private readonly sandBorderTextureKeys = ['beach-corner-1', 'beach-corner-2', 'beach-corner-3'] as const;
     private readonly mapSeed: number | null;
     private readonly allowPointerRegenerate: boolean;
-    private readonly onMapPointerDown?: () => void;
+    private readonly onMapPointerDown?: (hit: MapPointerHit) => void;
     private rng: () => number = Math.random;
+    private hoverGraphics: Phaser.GameObjects.Graphics | null = null;
+    private structuresContainer: Phaser.GameObjects.Container | null = null;
+    private structureImages: Map<string, Phaser.GameObjects.Image> = new Map();
+    private hoveredVertexId: string | null = null;
+    private hoveredEdgeId: string | null = null;
+    private pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null;
+    private structures: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>;
 
     constructor(options?: MapGenSceneOptions) {
         super('MapGenTest');
@@ -761,6 +797,8 @@ export class MapGenTest extends Scene {
         this.allowPointerRegenerate = options?.allowPointerRegenerate ?? true;
         this.compactFit = options?.compactFit ?? false;
         this.onMapPointerDown = options?.onMapPointerDown;
+        this.pendingBuildKind = options?.pendingBuildKind;
+        this.structures = options?.structures ?? [];
         if (this.compactFit) {
             this.hexSize = 34;
             this.mapZoom = 1;
@@ -777,6 +815,17 @@ export class MapGenTest extends Scene {
                 this.load.image(key, `/images/beach-corner-${idx + 1}.png`);
             }
         });
+        
+        // Load building assets
+        if (!this.textures.exists('settlement-img')) {
+            this.load.image('settlement-img', '/images/buildings/settlement.png');
+        }
+        if (!this.textures.exists('city-img')) {
+            this.load.image('city-img', '/images/buildings/city.png');
+        }
+        if (!this.textures.exists('road-img')) {
+            this.load.image('road-img', '/images/buildings/road.png');
+        }
     }
 
     regenerateMap(): void {
@@ -802,8 +851,105 @@ export class MapGenTest extends Scene {
             this.input.on('pointerdown', () => this.regenerateMap());
         } else if (this.onMapPointerDown) {
             const onMap = this.onMapPointerDown;
-            this.input.on('pointerdown', () => onMap());
+            this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+                onMap(this.computeMapPointerHit(pointer.worldX, pointer.worldY));
+            });
         }
+    }
+
+    private buildVertexHit(hex: Hex, corner: number): MapPointerVertexHit {
+        const neighborCorners = [corner, (corner + 5) % 6];
+        const adjacentHexes: Array<{ q: number; r: number }> = [{ q: hex.q, r: hex.r }];
+
+        for (const dirIdx of neighborCorners) {
+            const [dq, dr] = HEX_DIRS[dirIdx];
+            const nq = hex.q + dq;
+            const nr = hex.r + dr;
+            if (this.hexMap.has(hexKey(nq, nr))) {
+                adjacentHexes.push({ q: nq, r: nr });
+            }
+        }
+
+        const dedupedSorted = adjacentHexes
+            .reduce<Array<{ q: number; r: number }>>((acc, current) => {
+                if (!acc.some((h) => h.q === current.q && h.r === current.r)) {
+                    acc.push(current);
+                }
+                return acc;
+            }, [])
+            .sort((a, b) => (a.q === b.q ? a.r - b.r : a.q - b.q));
+
+        const id = `v:${dedupedSorted.map((h) => `${h.q},${h.r}`).join('|')}`;
+        return {
+            id,
+            hex: { q: hex.q, r: hex.r },
+            corner,
+            adjacentHexes: dedupedSorted,
+        };
+    }
+
+    private buildEdgeHit(hex: Hex, edge: number): MapPointerEdgeHit {
+        // Edge 0 is between vertices 0 and 1, connects hex to neighbor in direction 0
+        const [dq, dr] = HEX_DIRS[edge];
+        const adjHex = this.hexMap.get(hexKey(hex.q + dq, hex.r + dr));
+        const adjacentHex = adjHex ? { q: hex.q + dq, r: hex.r + dr } : { q: hex.q + dq, r: hex.r + dr };
+
+        // Two vertices forming this edge
+        const v1 = edge;
+        const v2 = (edge + 1) % 6;
+
+        const v1Hit = this.buildVertexHit(hex, v1);
+        const v2Hit = this.buildVertexHit(hex, v2);
+
+        const id = `e:${[hex.q, hex.r, edge].join(',')}`;
+        return {
+            id,
+            hex: { q: hex.q, r: hex.r },
+            edge,
+            adjacentHex,
+            vertices: [
+                { id: v1Hit.id, hex: v1Hit.hex, corner: v1 },
+                { id: v2Hit.id, hex: v2Hit.hex, corner: v2 },
+            ],
+        };
+    }
+
+    private computeMapPointerHit(worldX: number, worldY: number): MapPointerHit {
+        const frac = pixelToFracHex(worldX, worldY, this.hexSize);
+        const rounded = hexRound(frac.q, frac.r);
+        const hitHex = this.hexMap.get(hexKey(rounded.q, rounded.r));
+        if (!hitHex) {
+            console.log('[MapHit] No hex at', { worldX, worldY, frac, rounded });
+            return { worldX, worldY, hex: null, vertex: null, edge: null };
+        }
+
+        const center = hexToPixel(hitHex.q, hitHex.r, this.hexSize);
+        const dx = worldX - center.x;
+        const dy = worldY - center.y;
+        if (!isInsideHex(dx, dy, this.hexSize)) {
+            console.log('[MapHit] Outside hex bounds', { worldX, worldY, dx, dy, hexSize: this.hexSize });
+            return { worldX, worldY, hex: null, vertex: null, edge: null };
+        }
+
+        const normalizedAngle = (Math.atan2(dy, dx) + Math.PI * 2) % (Math.PI * 2);
+        
+        // Find closest vertex mathematically
+        const corner = Math.round(normalizedAngle / (Math.PI / 3)) % 6;
+        const vertex = this.buildVertexHit(hitHex, corner);
+        
+        // Find closest edge mathematically
+        const edgeAngle = Math.floor(normalizedAngle / (Math.PI / 3)) % 6;
+        const edge = this.buildEdgeHit(hitHex, edgeAngle);
+
+        const result = {
+            worldX,
+            worldY,
+            hex: { q: hitHex.q, r: hitHex.r },
+            vertex,
+            edge,
+        };
+        console.log('[MapHit] Valid hit:', result);
+        return result;
     }
 
     private computeHexMapBounds(): { minX: number; maxX: number; minY: number; maxY: number } {
@@ -1069,6 +1215,27 @@ export class MapGenTest extends Scene {
         if (this.compactFit) {
             this.fitCameraToVisibleMap();
         }
+
+        // Create hover graphics layer on top
+        this.hoverGraphics = this.add.graphics().setDepth(5);
+        
+        // Create structures container for images
+        this.structuresContainer = this.add.container(0, 0).setDepth(4);
+        this.renderStructures();
+        
+        // Set up pointer move events for hover detection
+        this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+            this.updateHoverState(pointer.worldX, pointer.worldY);
+        });
+
+        this.input.on('pointerout', () => {
+            this.clearHover();
+        });
+
+        // Redraw on Phaser resize events
+        this.scale.on('resize', () => {
+            this.renderStructures();
+        });
     }
 
     private drawSandBorder(sz: number): void {
@@ -1188,6 +1355,182 @@ export class MapGenTest extends Scene {
             }
         }
     }
+
+    private updateHoverState(worldX: number, worldY: number): void {
+        const hit = this.computeMapPointerHit(worldX, worldY);
+        let newVertexId: string | null = null;
+        let newEdgeId: string | null = null;
+
+        if ((this.pendingBuildKind === 'SETTLEMENT' || this.pendingBuildKind === 'CITY') && hit.vertex) {
+            newVertexId = hit.vertex.id;
+        } else if (this.pendingBuildKind === 'ROAD' && hit.edge) {
+            newEdgeId = hit.edge.id;
+        }
+
+        if (this.hoveredVertexId !== newVertexId || this.hoveredEdgeId !== newEdgeId) {
+            this.hoveredVertexId = newVertexId;
+            this.hoveredEdgeId = newEdgeId;
+            this.redrawHover();
+        }
+    }
+
+    private clearHover(): void {
+        if (this.hoveredVertexId !== null || this.hoveredEdgeId !== null) {
+            this.hoveredVertexId = null;
+            this.hoveredEdgeId = null;
+            this.redrawHover();
+        }
+    }
+
+    private redrawHover(): void {
+        if (!this.hoverGraphics) return;
+        this.hoverGraphics.clear();
+
+        const sz = this.hexSize;
+
+        // Draw vertex hover
+        if (this.hoveredVertexId) {
+            // Find a hex that has this vertex to get its position
+            for (const hex of this.hexes) {
+                // Check vertices by corners
+                for (let corner = 0; corner < 6; corner++) {
+                    const vertexHit = this.buildVertexHit(hex, corner);
+                    if (vertexHit.id === this.hoveredVertexId) {
+                        const p = hexToPixel(hex.q, hex.r, sz);
+                        const angle = (Math.PI / 3) * corner;
+                        const vx = p.x + sz * Math.cos(angle);
+                        const vy = p.y + sz * Math.sin(angle);
+                        
+                        // Draw a bright green circle at the vertex
+                        this.hoverGraphics.fillStyle(0x4ade80, 0.3);
+                        this.hoverGraphics.fillCircle(vx, vy, sz * 0.3);
+                        this.hoverGraphics.lineStyle(3, 0x4ade80, 0.9);
+                        this.hoverGraphics.strokeCircle(vx, vy, sz * 0.3);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Draw edge hover
+        if (this.hoveredEdgeId) {
+            for (const hex of this.hexes) {
+                for (let edge = 0; edge < 6; edge++) {
+                    const edgeHit = this.buildEdgeHit(hex, edge);
+                    if (edgeHit.id === this.hoveredEdgeId) {
+                        const p = hexToPixel(hex.q, hex.r, sz);
+                        
+                        // Edge goes from vertex i to vertex (i+1)
+                        const angle1 = (Math.PI / 3) * edge;
+                        const angle2 = (Math.PI / 3) * ((edge + 1) % 6);
+                        const ex1 = p.x + sz * Math.cos(angle1);
+                        const ey1 = p.y + sz * Math.sin(angle1);
+                        const ex2 = p.x + sz * Math.cos(angle2);
+                        const ey2 = p.y + sz * Math.sin(angle2);
+                        
+                        // Draw a bright line for the edge
+                        this.hoverGraphics.lineStyle(5, 0x4ade80, 0.9);
+                        this.hoverGraphics.beginPath();
+                        this.hoverGraphics.moveTo(ex1, ey1);
+                        this.hoverGraphics.lineTo(ex2, ey2);
+                        this.hoverGraphics.strokePath();
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    private renderStructures(): void {
+        if (!this.structuresContainer) return;
+        
+        // Clear old images
+        this.structureImages.forEach(img => img.destroy());
+        this.structureImages.clear();
+        this.structuresContainer.removeAll();
+
+        const sz = this.hexSize;
+
+        for (const struct of this.structures) {
+            let found = false;
+            
+            if ((struct.type === 'SETTLEMENT' || struct.type === 'CITY') && struct.vertex) {
+                // Find the pixel position of this vertex
+                const vertexId = struct.vertex.id;
+                for (const hex of this.hexes) {
+                    if (found) break;
+                    for (let corner = 0; corner < 6; corner++) {
+                        const vertexHit = this.buildVertexHit(hex, corner);
+                        if (vertexHit.id === vertexId) {
+                            const p = hexToPixel(hex.q, hex.r, sz);
+                            const angle = (Math.PI / 3) * corner;
+                            const vx = p.x + sz * Math.cos(angle);
+                            const vy = p.y + sz * Math.sin(angle);
+                            
+                            // Create structure image
+                            const imgKey = struct.type === 'CITY' ? 'city-img' : 'settlement-img';
+                            const structImg = this.add.image(vx, vy, imgKey);
+                            structImg.setScale(sz * 0.001); // Scale based on hex size
+                            structImg.setTint(parseInt(struct.ownerColor.slice(1), 16));
+                            structImg.setDepth(struct.type === 'CITY' ? 5 : 4);
+                            this.structuresContainer?.add(structImg);
+                            this.structureImages.set(vertexId, structImg);
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            } else if (struct.type === 'ROAD' && struct.edge) {
+                // Find the pixel positions of this edge
+                const edgeId = struct.edge.id;
+                for (const hex of this.hexes) {
+                    if (found) break;
+                    for (let edge = 0; edge < 6; edge++) {
+                        const edgeHit = this.buildEdgeHit(hex, edge);
+                        if (edgeHit.id === edgeId) {
+                            const p = hexToPixel(hex.q, hex.r, sz);
+                            
+                            const angle1 = (Math.PI / 3) * edge;
+                            const angle2 = (Math.PI / 3) * ((edge + 1) % 6);
+                            const ex1 = p.x + sz * Math.cos(angle1);
+                            const ey1 = p.y + sz * Math.sin(angle1);
+                            const ex2 = p.x + sz * Math.cos(angle2);
+                            const ey2 = p.y + sz * Math.sin(angle2);
+                            
+                            // Draw grey road line
+                            const roadGraphics = this.add.graphics();
+                            roadGraphics.lineStyle(5, 0x808080, 1); // Grey line
+                            roadGraphics.lineBetween(ex1, ey1, ex2, ey2);
+                            roadGraphics.setDepth(3); // Below settlements/cities at depth 4
+                            this.structuresContainer?.add(roadGraphics);
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Ensure z-index ordering within the container
+        this.structuresContainer.sort('depth');
+    }
+
+    updateMap(pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null, structures?: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>): void {
+        if (pendingBuildKind !== undefined) {
+            this.pendingBuildKind = pendingBuildKind;
+        }
+        if (structures !== undefined) {
+            this.structures = structures;
+        }
+        this.redrawHover();
+        this.renderStructures();
+    }
+
+    onViewportResize(): void {
+        // Clear and redraw structures + hover to recalculate positions with new viewport
+        this.renderStructures();
+        this.clearHover();
+    }
 }
 
 // Screen wrapper for integration with app
@@ -1208,7 +1551,9 @@ export class TestMapGenScreen {
     /** Extra pixels to raise the map (gap above bottom bar / UI). ~20px ≈ 0.5cm at 96dpi. */
     private readonly mapLiftPx: number;
     private readonly compactFit: boolean;
-    private readonly onMapPointerDown?: () => void;
+    private readonly onMapPointerDown?: (hit: MapPointerHit) => void;
+    private readonly pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null;
+    private readonly structures: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>;
     private onWindowResize: (() => void) | null = null;
     private readonly backgroundMusic = new Audio('/audio/game-board-theme.mp3');
     private isMusicMuted = false;
@@ -1226,7 +1571,9 @@ export class TestMapGenScreen {
         /** Shifts the map upward by this many pixels (adds to bottom inset). */
         mapLiftPx?: number;
         compactFit?: boolean;
-        onMapPointerDown?: () => void;
+        onMapPointerDown?: (hit: MapPointerHit) => void;
+        pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null;
+        structures?: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>;
     }) {
         this.showExitButton = options?.showExitButton ?? true;
         this.enableBackgroundMusic = options?.enableBackgroundMusic ?? true;
@@ -1237,6 +1584,8 @@ export class TestMapGenScreen {
         this.mapLiftPx = Math.max(0, options?.mapLiftPx ?? 0);
         this.compactFit = options?.compactFit ?? false;
         this.onMapPointerDown = options?.onMapPointerDown;
+        this.pendingBuildKind = options?.pendingBuildKind;
+        this.structures = options?.structures ?? [];
         this.backgroundMusic.loop = true;
         this.onSettingsChanged();
     }
@@ -1375,6 +1724,8 @@ export class TestMapGenScreen {
                 allowPointerRegenerate: this.allowPointerRegenerate,
                 compactFit: this.compactFit,
                 onMapPointerDown: this.onMapPointerDown,
+                pendingBuildKind: this.pendingBuildKind,
+                structures: this.structures,
             })],
             scale: {
                 mode: Phaser.Scale.FIT,
@@ -1396,6 +1747,9 @@ export class TestMapGenScreen {
                 const scene = this.game.scene.getScene('MapGenTest') as MapGenTest | undefined;
                 scene?.fitCameraToVisibleMap();
             }
+            // Redraw structures and hover when viewport resizes
+            const scene = this.game.scene.getScene('MapGenTest') as MapGenTest | undefined;
+            scene?.onViewportResize();
         };
         window.addEventListener('resize', this.onWindowResize);
     }
@@ -1418,6 +1772,11 @@ export class TestMapGenScreen {
         this.isMusicMuted = !this.isMusicMuted;
         this.backgroundMusic.muted = this.isMusicMuted;
         this.updateMusicButtonIcon();
+    }
+    
+
+    getPhaser3Scene(): MapGenTest | undefined {
+        return this.game?.scene.getScene('MapGenTest') as MapGenTest | undefined;
     }
 
     private updateMusicButtonIcon(): void {
