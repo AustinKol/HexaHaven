@@ -207,6 +207,10 @@ export class GameBoardScreen {
   private rollDiceButton: HTMLButtonElement | null = null;
   private bankTradeButton: HTMLButtonElement | null = null;
   private endTurnButton: HTMLButtonElement | null = null;
+  private bankGiveSelection: ResourceKey = 'EMBER';
+  private bankReceiveSelection: ResourceKey = 'STONE';
+  private bankGiveButtons: Partial<Record<ResourceKey, HTMLButtonElement>> = {};
+  private bankReceiveButtons: Partial<Record<ResourceKey, HTMLButtonElement>> = {};
   private buttonContainer: HTMLElement | null = null;
   private isMusicMuted = false;
   private turnHudBindings: GameBoardTurnHudBindings | null = null;
@@ -438,10 +442,13 @@ export class GameBoardScreen {
       this.diceHudPanel.remove();
     }
 
+    this.bankGiveButtons = {};
+    this.bankReceiveButtons = {};
+
     const panel = document.createElement('div');
     panel.className = 'absolute top-16 right-4 rounded-xl border border-slate-600 bg-slate-900/88 px-4 py-3 text-white shadow-md';
     panel.style.zIndex = '3';
-    panel.style.width = '230px';
+    panel.style.width = '250px';
 
     const header = document.createElement('div');
     header.className = 'mb-2 flex items-center justify-between gap-2';
@@ -503,16 +510,110 @@ export class GameBoardScreen {
 
     const endTurnButton = document.createElement('button');
     endTurnButton.type = 'button';
-    endTurnButton.className = 'font-hexahaven-ui rounded-md border border-emerald-400/60 bg-emerald-900/60 px-2 py-2 text-xs font-semibold';
+    endTurnButton.className =
+      'font-hexahaven-ui rounded-md border border-emerald-400/60 bg-emerald-900/60 px-2 py-2 text-xs font-semibold';
     endTurnButton.textContent = 'End Turn';
     endTurnButton.addEventListener('click', () => this.handleEndTurnClick());
 
+    const bankGiveLabel = document.createElement('div');
+    bankGiveLabel.className = 'font-hexahaven-ui text-[11px] text-slate-300';
+    bankGiveLabel.textContent = 'Give 4';
+
+    const bankGiveRow = document.createElement('div');
+    bankGiveRow.className = 'flex flex-wrap gap-1';
+
+    RESOURCE_BOX_CONFIG.forEach(({ key, shortLabel, iconSrc, boxBg, boxBorder, boxHoverBg, countColor }) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'flex h-9 w-9 items-center justify-center rounded-md border transition-colors';
+      btn.style.backgroundColor = boxBg;
+      btn.style.borderColor = boxBorder;
+      btn.style.color = countColor;
+      btn.style.cursor = 'pointer';
+
+      btn.addEventListener('mouseenter', () => {
+        btn.style.backgroundColor = boxHoverBg;
+      });
+      btn.addEventListener('mouseleave', () => {
+        btn.style.backgroundColor = boxBg;
+      });
+
+      btn.addEventListener('click', () => {
+        this.bankGiveSelection = key;
+        this.refreshBankTradeUi();
+        this.updateTurnHud();
+      });
+
+      if (iconSrc) {
+        const img = document.createElement('img');
+        img.src = iconSrc;
+        img.alt = shortLabel;
+        img.className = 'h-6 w-6 object-contain pointer-events-none';
+        img.draggable = false;
+        btn.appendChild(img);
+      } else {
+        btn.textContent = shortLabel;
+      }
+
+      this.bankGiveButtons[key] = btn;
+      bankGiveRow.appendChild(btn);
+    });
+
+    const bankReceiveLabel = document.createElement('div');
+    bankReceiveLabel.className = 'font-hexahaven-ui text-[11px] text-slate-300';
+    bankReceiveLabel.textContent = 'Receive 1';
+
+    const bankReceiveRow = document.createElement('div');
+    bankReceiveRow.className = 'flex flex-wrap gap-1';
+
+    RESOURCE_BOX_CONFIG.forEach(({ key, shortLabel, iconSrc, boxBg, boxBorder, boxHoverBg, countColor }) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'flex h-9 w-9 items-center justify-center rounded-md border transition-colors';
+      btn.style.backgroundColor = boxBg;
+      btn.style.borderColor = boxBorder;
+      btn.style.color = countColor;
+      btn.style.cursor = 'pointer';
+
+      btn.addEventListener('mouseenter', () => {
+        btn.style.backgroundColor = boxHoverBg;
+      });
+      btn.addEventListener('mouseleave', () => {
+        btn.style.backgroundColor = boxBg;
+      });
+
+      btn.addEventListener('click', () => {
+        this.bankReceiveSelection = key;
+        this.refreshBankTradeUi();
+        this.updateTurnHud();
+      });
+
+      if (iconSrc) {
+        const img = document.createElement('img');
+        img.src = iconSrc;
+        img.alt = shortLabel;
+        img.className = 'h-6 w-6 object-contain pointer-events-none';
+        img.draggable = false;
+        btn.appendChild(img);
+      } else {
+        btn.textContent = shortLabel;
+      }
+
+      this.bankReceiveButtons[key] = btn;
+      bankReceiveRow.appendChild(btn);
+    });
+
     const bankTradeButton = document.createElement('button');
-    bankTradeButton.className = 'font-hexahaven-ui rounded-md border border-amber-400/60 bg-amber-900/60 px-2 py-2 text-xs font-semibold';
-    bankTradeButton.textContent = '4 Ember → 1 Stone';
+    bankTradeButton.type = 'button';
+    bankTradeButton.className =
+      'font-hexahaven-ui rounded-md border border-amber-400/60 bg-amber-900/60 px-2 py-2 text-xs font-semibold';
     bankTradeButton.addEventListener('click', () => this.handleBankTradeClick());
 
     actions.appendChild(endTurnButton);
+    actions.appendChild(bankGiveLabel);
+    actions.appendChild(bankGiveRow);
+    actions.appendChild(bankReceiveLabel);
+    actions.appendChild(bankReceiveRow);
     actions.appendChild(bankTradeButton);
 
     panel.appendChild(header);
@@ -533,6 +634,8 @@ export class GameBoardScreen {
 
     parent.appendChild(panel);
     parent.appendChild(dicePanel);
+
+    this.refreshBankTradeUi();
     this.updateTurnHud();
   }
 
@@ -1244,7 +1347,13 @@ export class GameBoardScreen {
       this.endTurnButton.style.cursor = this.endTurnButton.disabled ? 'not-allowed' : 'pointer';
     }
     if (this.bankTradeButton) {
-      const canBankTrade = Boolean(isActivePlayer && currentPhase === 'ACTION');
+      const canBankTrade =
+        Boolean(isActivePlayer && currentPhase === 'ACTION') &&
+        this.canCurrentPlayerUseSelectedBankTrade();
+
+      this.bankTradeButton.textContent =
+        `Trade 4 ${RESOURCE_LABELS[this.bankGiveSelection]} → 1 ${RESOURCE_LABELS[this.bankReceiveSelection]}`;
+
       this.bankTradeButton.disabled = !canBankTrade;
       this.bankTradeButton.style.opacity = this.bankTradeButton.disabled ? '0.55' : '1';
       this.bankTradeButton.style.cursor = this.bankTradeButton.disabled ? 'not-allowed' : 'pointer';
@@ -1360,16 +1469,79 @@ export class GameBoardScreen {
     }
   }
 
+  private refreshBankTradeUi(): void {
+    RESOURCE_KEYS.forEach((key) => {
+      const giveBtn = this.bankGiveButtons[key];
+      if (giveBtn) {
+        giveBtn.style.outline = this.bankGiveSelection === key ? '2px solid #22c55e' : 'none';
+        giveBtn.style.outlineOffset = '1px';
+        giveBtn.style.opacity = '1';
+      }
+
+      const receiveBtn = this.bankReceiveButtons[key];
+      if (receiveBtn) {
+        receiveBtn.style.outline = this.bankReceiveSelection === key ? '2px solid #22c55e' : 'none';
+        receiveBtn.style.outlineOffset = '1px';
+        receiveBtn.style.opacity = '1';
+      }
+    });
+
+    if (this.bankTradeButton) {
+      this.bankTradeButton.textContent =
+        `Trade 4 ${RESOURCE_LABELS[this.bankGiveSelection]} → 1 ${RESOURCE_LABELS[this.bankReceiveSelection]}`;
+    }
+  }
+
+  private canCurrentPlayerUseSelectedBankTrade(): boolean {
+    const gs = this.liveGameState ?? clientState.gameState;
+    const pid = this.livePlayerId;
+    if (!gs || !pid) {
+      return false;
+    }
+
+    const player = gs.playersById[pid];
+    if (!player) {
+      return false;
+    }
+
+    if (this.bankGiveSelection === this.bankReceiveSelection) {
+      return false;
+    }
+
+    return inventoryCount(player.resources[this.bankGiveSelection]) >= 4;
+  }
+  
   private handleBankTradeClick(): void {
     const roomId = getLobbySession()?.roomId ?? null;
     if (!roomId) {
       return;
     }
 
+    if (this.bankGiveSelection === this.bankReceiveSelection) {
+      console.error('Bank trade failed: give and receive resource cannot be the same.');
+      return;
+    }
+
+    const gs = this.liveGameState ?? clientState.gameState;
+    const pid = this.livePlayerId;
+    if (!gs || !pid) {
+      return;
+    }
+
+    const player = gs.playersById[pid];
+    if (!player) {
+      return;
+    }
+
+    if (inventoryCount(player.resources[this.bankGiveSelection]) < 4) {
+      console.error(`Bank trade failed: need at least 4 ${RESOURCE_LABELS[this.bankGiveSelection]}.`);
+      return;
+    }
+
     void bankTrade({
       gameId: roomId,
-      giveResource: 'EMBER',
-      receiveResource: 'STONE',
+      giveResource: this.bankGiveSelection,
+      receiveResource: this.bankReceiveSelection,
     }).catch((error) => {
       console.error('Bank trade failed:', error);
     });
@@ -1662,6 +1834,10 @@ export class GameBoardScreen {
     this.rollDiceButton = null;
     this.endTurnButton = null;
     this.bankTradeButton = null;
+    this.bankGiveButtons = {};
+    this.bankReceiveButtons = {};
+    this.bankGiveSelection = 'EMBER';
+    this.bankReceiveSelection = 'STONE';
     this.buttonContainer = null;
     this.mapScreen?.destroy();
     this.mapScreen = null;
