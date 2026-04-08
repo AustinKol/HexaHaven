@@ -108,7 +108,7 @@ export function createDiceHud(): DiceHud {
   root.appendChild(caption);
 
   let settleHandler: (() => void) | null = null;
-  let rollFadeTimer: ReturnType<typeof setTimeout> | null = null;
+  let rollFadeTimer: number | null = null;
 
   const setRollingShake = (on: boolean): void => {
     row.classList.toggle('hexahaven-dice-roll-shake', on);

@@ -200,9 +200,9 @@ export class GameBoardScreen {
   private diceHud: DiceHud | null = null;
   /** Local roll: waiting for server `lastDiceRoll` after clicking Roll. */
   private expectingLocalDiceAck = false;
-  private diceRollTicker: ReturnType<typeof setInterval> | null = null;
-  private diceFailSafeTimer: ReturnType<typeof setTimeout> | null = null;
-  private diceCompleteDelayTimer: ReturnType<typeof setTimeout> | null = null;
+  private diceRollTicker: number | null = null;
+  private diceFailSafeTimer: number | null = null;
+  private diceCompleteDelayTimer: number | null = null;
   private localDiceRollStartedAt: number | null = null;
   private rollDiceButton: HTMLButtonElement | null = null;
   private bankTradeButton: HTMLButtonElement | null = null;
@@ -512,7 +512,6 @@ export class GameBoardScreen {
     bankTradeButton.textContent = '4 Ember → 1 Stone';
     bankTradeButton.addEventListener('click', () => this.handleBankTradeClick());
 
-    actions.appendChild(rollDiceButton);
     actions.appendChild(endTurnButton);
     actions.appendChild(bankTradeButton);
 
