@@ -3,6 +3,7 @@ import type { ClientToServerEvents, ServerToClientEvents } from '../../shared/ty
 import { ClientEnv } from '../config/env';
 import { registerClientEvents } from './registerClientEvents';
 import type {
+  BankTradeRequest,
   CreateGameAckData,
   CreateGameRequest,
   JoinGameAckData,
@@ -121,5 +122,14 @@ export async function syncGameState(gameId: string, gameState: any): Promise<Sim
   const s = connectSocket({ gameId });
   return emitWithAck<SimpleActionAckData>((ack) => {
     s.emit('SYNC_GAME_STATE', { gameId, gameState }, ack);
+  });
+}
+
+export async function bankTrade(
+  request: BankTradeRequest,
+): Promise<SimpleActionAckData> {
+  const s = connectSocket({ gameId: request.gameId });
+  return emitWithAck<SimpleActionAckData>((ack) => {
+    s.emit('BANK_TRADE', request, ack);
   });
 }
