@@ -1,4 +1,4 @@
-import { playBuildPlacementSound } from '../audio/buildSounds';
+import { playBuildPlacementSound, playDiceRollSound } from '../audio/buildSounds';
 import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledBoardMusicVolume } from '../audio/musicVolume';
 import { ClientEnv } from '../config/env';
 import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings } from '../settings/gameSettings';
@@ -7,6 +7,7 @@ import type { DiceRoll, GamePhase, GameState, ResourceBundle, StructureState, Ve
 import { connectSocket, endTurn, rollDice, syncGameState } from '../networking/socketClient';
 import { clientState, setClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
+import { createDiceHud, type DiceHud } from '../ui/diceRollDisplay';
 import { TestMapGenScreen, type MapPointerHit } from './TestMapGenScreen';
 
 type ResourceKey = keyof ResourceBundle;
@@ -192,9 +193,17 @@ export class GameBoardScreen {
   /** Left bar: tap counts 0…owned (optional; build actions pay from inventory when you can afford). */
   private resourceSelection: ResourceBundle = emptyResourceBundle();
   private turnHudPanel: HTMLDivElement | null = null;
+  /** Dice display — bottom-left, above the resource bar. */
+  private diceHudPanel: HTMLDivElement | null = null;
   private currentPlayerValue: HTMLDivElement | null = null;
   private currentPhaseValue: HTMLDivElement | null = null;
-  private lastDiceRollValue: HTMLDivElement | null = null;
+  private diceHud: DiceHud | null = null;
+  /** Local roll: waiting for server `lastDiceRoll` after clicking Roll. */
+  private expectingLocalDiceAck = false;
+  private diceRollTicker: ReturnType<typeof setInterval> | null = null;
+  private diceFailSafeTimer: ReturnType<typeof setTimeout> | null = null;
+  private diceCompleteDelayTimer: ReturnType<typeof setTimeout> | null = null;
+  private localDiceRollStartedAt: number | null = null;
   private rollDiceButton: HTMLButtonElement | null = null;
   private endTurnButton: HTMLButtonElement | null = null;
   private buttonContainer: HTMLElement | null = null;
@@ -424,6 +433,9 @@ export class GameBoardScreen {
     if (this.turnHudPanel) {
       this.turnHudPanel.remove();
     }
+    if (this.diceHudPanel) {
+      this.diceHudPanel.remove();
+    }
 
     const panel = document.createElement('div');
     panel.className = 'absolute top-16 right-4 rounded-xl border border-slate-600 bg-slate-900/88 px-4 py-3 text-white shadow-md';
@@ -461,27 +473,39 @@ export class GameBoardScreen {
     const currentPhaseValue = document.createElement('div');
     currentPhaseValue.className = 'font-hexahaven-ui text-sm font-semibold mb-2';
 
+    const diceHud = createDiceHud();
+    diceHud.root.style.marginBottom = '0';
+
     const lastDiceRollLabel = document.createElement('div');
     lastDiceRollLabel.className = 'font-hexahaven-ui text-xs text-slate-300';
     lastDiceRollLabel.textContent = 'Last Dice Roll';
 
-    const lastDiceRollValue = document.createElement('div');
-    lastDiceRollValue.className = 'font-hexahaven-ui text-sm font-semibold mb-3';
-
-    const actions = document.createElement('div');
-    actions.className = 'grid grid-cols-2 gap-2';
+    const dicePanel = document.createElement('div');
+    dicePanel.className =
+      'absolute left-4 flex flex-col gap-2 rounded-xl border border-slate-600 bg-slate-900/88 px-3 py-2 text-white shadow-md pointer-events-auto';
+    dicePanel.style.zIndex = '3';
+    dicePanel.style.bottom = `${GAME_BOARD_BOTTOM_BAR_PX + 10}px`;
+    dicePanel.setAttribute('aria-label', 'Dice roll');
+    dicePanel.appendChild(lastDiceRollLabel);
+    dicePanel.appendChild(diceHud.root);
 
     const rollDiceButton = document.createElement('button');
-    rollDiceButton.className = 'font-hexahaven-ui rounded-md border border-cyan-400/60 bg-cyan-900/60 px-2 py-2 text-xs font-semibold';
+    rollDiceButton.type = 'button';
+    rollDiceButton.className =
+      'font-hexahaven-ui w-full rounded-md border border-cyan-400/60 bg-cyan-900/60 px-2 py-2 text-xs font-semibold';
     rollDiceButton.textContent = 'Roll Dice';
     rollDiceButton.addEventListener('click', () => this.handleRollDiceClick());
+    dicePanel.appendChild(rollDiceButton);
+
+    const actions = document.createElement('div');
+    actions.className = 'flex flex-col gap-2';
 
     const endTurnButton = document.createElement('button');
+    endTurnButton.type = 'button';
     endTurnButton.className = 'font-hexahaven-ui rounded-md border border-emerald-400/60 bg-emerald-900/60 px-2 py-2 text-xs font-semibold';
     endTurnButton.textContent = 'End Turn';
     endTurnButton.addEventListener('click', () => this.handleEndTurnClick());
 
-    actions.appendChild(rollDiceButton);
     actions.appendChild(endTurnButton);
 
     panel.appendChild(header);
@@ -489,18 +513,18 @@ export class GameBoardScreen {
     panel.appendChild(currentPlayerValue);
     panel.appendChild(currentPhaseLabel);
     panel.appendChild(currentPhaseValue);
-    panel.appendChild(lastDiceRollLabel);
-    panel.appendChild(lastDiceRollValue);
     panel.appendChild(actions);
 
     this.turnHudPanel = panel;
+    this.diceHudPanel = dicePanel;
     this.currentPlayerValue = currentPlayerValue;
     this.currentPhaseValue = currentPhaseValue;
-    this.lastDiceRollValue = lastDiceRollValue;
+    this.diceHud = diceHud;
     this.rollDiceButton = rollDiceButton;
     this.endTurnButton = endTurnButton;
 
     parent.appendChild(panel);
+    parent.appendChild(dicePanel);
     this.updateTurnHud();
   }
 
@@ -1172,7 +1196,8 @@ export class GameBoardScreen {
 
     const currentPlayer = liveValues?.currentPlayer ?? activePlayerName ?? activePlayerId ?? 'Waiting';
     const currentPhase: GamePhase | null = liveValues?.currentPhase ?? gameState?.turn.phase ?? null;
-    const lastDiceRollText = this.formatLastDiceRollDisplay(liveValues?.lastDiceRoll ?? gameState?.turn.lastDiceRoll);
+    const lastDiceRollRaw = liveValues?.lastDiceRoll ?? gameState?.turn.lastDiceRoll;
+    const lastDiceRollObj = this.asDiceRoll(lastDiceRollRaw);
 
     const isActivePlayer = Boolean(activePlayerId && this.livePlayerId && activePlayerId === this.livePlayerId);
     const canRoll = typeof liveValues?.canRollDice === 'boolean'
@@ -1191,8 +1216,12 @@ export class GameBoardScreen {
       this.currentPhaseValue.style.color = currentPhase === 'ROLL' ? '#67e8f9' : '#86efac';
     }
 
-    if (this.lastDiceRollValue) {
-      this.lastDiceRollValue.textContent = lastDiceRollText;
+    if (this.expectingLocalDiceAck && lastDiceRollObj && this.diceRollTicker !== null) {
+      this.completeLocalDiceRoll(lastDiceRollObj);
+    }
+
+    if (this.diceHud && this.diceRollTicker === null) {
+      this.syncDiceHudFromRollData(lastDiceRollRaw);
     }
 
     if (this.rollDiceButton) {
@@ -1208,26 +1237,111 @@ export class GameBoardScreen {
     }
   }
 
-  private formatLastDiceRollDisplay(lastDiceRoll: DiceRoll | string | null | undefined): string {
+  private asDiceRoll(raw: unknown): DiceRoll | null {
+    if (raw && typeof raw === 'object' && 'd1Val' in raw && 'd2Val' in raw && 'sum' in raw) {
+      return raw as DiceRoll;
+    }
+    return null;
+  }
+
+  private syncDiceHudFromRollData(lastDiceRoll: DiceRoll | string | null | undefined): void {
+    if (!this.diceHud) {
+      return;
+    }
     if (typeof lastDiceRoll === 'string') {
-      return lastDiceRoll;
+      this.diceHud.setFromStringMessage(lastDiceRoll);
+      return;
     }
-
     if (lastDiceRoll) {
-      return `${lastDiceRoll.d1Val} + ${lastDiceRoll.d2Val} = ${lastDiceRoll.sum}`;
+      this.diceHud.setFromRoll(lastDiceRoll);
+      return;
     }
+    this.diceHud.setPlaceholder(this.fallbackLastDiceRoll);
+  }
 
-    return this.fallbackLastDiceRoll;
+  private startLocalDiceRollAnimation(): void {
+    if (this.diceRollTicker !== null) {
+      return;
+    }
+    if (this.diceCompleteDelayTimer !== null) {
+      clearTimeout(this.diceCompleteDelayTimer);
+      this.diceCompleteDelayTimer = null;
+    }
+    this.expectingLocalDiceAck = true;
+    this.localDiceRollStartedAt = Date.now();
+    playDiceRollSound();
+    this.diceHud?.setRollingShake(true);
+    this.diceHud?.setRandomRollingFrame();
+    this.diceRollTicker = window.setInterval(() => {
+      this.diceHud?.setRandomRollingFrame();
+    }, 72);
+    this.diceFailSafeTimer = window.setTimeout(() => {
+      this.cancelLocalDiceRollAnimation();
+    }, 5000);
+  }
+
+  private completeLocalDiceRoll(roll: DiceRoll): void {
+    const startedAt = this.localDiceRollStartedAt;
+    if (startedAt !== null) {
+      const elapsedMs = Date.now() - startedAt;
+      const remainingMs = Math.max(0, 1000 - elapsedMs);
+      if (remainingMs > 0) {
+        if (this.diceCompleteDelayTimer === null) {
+          this.diceCompleteDelayTimer = window.setTimeout(() => {
+            this.diceCompleteDelayTimer = null;
+            this.completeLocalDiceRoll(roll);
+          }, remainingMs);
+        }
+        return;
+      }
+    }
+    if (this.diceRollTicker !== null) {
+      clearInterval(this.diceRollTicker);
+      this.diceRollTicker = null;
+    }
+    if (this.diceFailSafeTimer !== null) {
+      clearTimeout(this.diceFailSafeTimer);
+      this.diceFailSafeTimer = null;
+    }
+    this.localDiceRollStartedAt = null;
+    this.expectingLocalDiceAck = false;
+    this.diceHud?.setRollingShake(false);
+    this.diceHud?.setFromRoll(roll);
+    this.diceHud?.playSettle();
+  }
+
+  private cancelLocalDiceRollAnimation(): void {
+    if (this.diceRollTicker !== null) {
+      clearInterval(this.diceRollTicker);
+      this.diceRollTicker = null;
+    }
+    if (this.diceFailSafeTimer !== null) {
+      clearTimeout(this.diceFailSafeTimer);
+      this.diceFailSafeTimer = null;
+    }
+    if (this.diceCompleteDelayTimer !== null) {
+      clearTimeout(this.diceCompleteDelayTimer);
+      this.diceCompleteDelayTimer = null;
+    }
+    this.localDiceRollStartedAt = null;
+    this.expectingLocalDiceAck = false;
+    this.diceHud?.setRollingShake(false);
+    const gameState = this.liveGameState;
+    const liveValues = this.turnHudBindings?.getValues?.() ?? null;
+    const lastDiceRollRaw = liveValues?.lastDiceRoll ?? gameState?.turn.lastDiceRoll;
+    this.syncDiceHudFromRollData(lastDiceRollRaw);
   }
 
   private handleRollDiceClick(): void {
     if (this.turnHudBindings?.onRollDice) {
+      this.startLocalDiceRollAnimation();
       this.turnHudBindings.onRollDice();
       this.updateTurnHud();
       return;
     }
     const roomId = getLobbySession()?.roomId ?? null;
     if (roomId) {
+      this.startLocalDiceRollAnimation();
       void rollDice(roomId);
     }
   }
@@ -1504,13 +1618,18 @@ export class GameBoardScreen {
     }
     this.resourceBarLeft = null;
     this.resourceBarRight = null;
+    this.cancelLocalDiceRollAnimation();
+    if (this.diceHudPanel) {
+      this.diceHudPanel.remove();
+      this.diceHudPanel = null;
+    }
     if (this.turnHudPanel) {
       this.turnHudPanel.remove();
       this.turnHudPanel = null;
     }
     this.currentPlayerValue = null;
     this.currentPhaseValue = null;
-    this.lastDiceRollValue = null;
+    this.diceHud = null;
     this.rollDiceButton = null;
     this.endTurnButton = null;
     this.buttonContainer = null;
