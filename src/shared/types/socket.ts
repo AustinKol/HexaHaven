@@ -61,6 +61,11 @@ export interface SyncGameStateRequest {
   gameState: GameState;
 }
 
+export interface SendChatMessageRequest {
+  gameId: string;
+  message: string;
+}
+
 // ─── Server -> Client ack data ───────────────────────────────────────
 
 export interface CreateGameAckData {
@@ -117,6 +122,10 @@ export interface ClientToServerEvents {
   ) => void;
   SYNC_GAME_STATE: (
     request: SyncGameStateRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  SEND_CHAT_MESSAGE: (
+    request: SendChatMessageRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,
   ) => void;
 }

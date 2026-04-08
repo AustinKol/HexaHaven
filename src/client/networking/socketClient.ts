@@ -9,7 +9,9 @@ import type {
   JoinGameRequest,
   SimpleActionAckData,
   SocketAck,
+  SendChatMessageRequest,
 } from '../../shared/types/socket';
+import { CLIENT_EVENTS } from '../../shared/constants/socketEvents';
 import { setClientState } from '../state/clientState';
 
 type TypedSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
@@ -122,4 +124,27 @@ export async function syncGameState(gameId: string, gameState: any): Promise<Sim
   return emitWithAck<SimpleActionAckData>((ack) => {
     s.emit('SYNC_GAME_STATE', { gameId, gameState }, ack);
   });
+}
+
+export async function sendChatMessage(gameId: string, message: string): Promise<void> {
+  const s = getSocket();
+  if (!s) {
+    console.error('Socket not connected.');
+    return;
+  }
+  try {
+    const request: SendChatMessageRequest = { gameId, message };
+    console.log(`[Client] Emitting SEND_CHAT_MESSAGE to socket ${s.id}. Connected: ${s.connected}`, request);
+    const data = await emitWithAck<SimpleActionAckData>((ack) => 
+      s.emit(CLIENT_EVENTS.SEND_CHAT_MESSAGE, request, ack)
+    );
+    console.log('[socketClient] Received gameState in sendChatMessage ack. Chat messages count:', data.gameState?.chatMessages?.length);
+    
+    // Update local state immediately from the server's response
+    setClientState({ 
+      gameState: data.gameState 
+    });
+  } catch (error) {
+    console.error('Failed to send chat message:', error);
+  }
 }

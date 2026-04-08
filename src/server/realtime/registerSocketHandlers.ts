@@ -11,6 +11,7 @@ import type {
   CreateGameAckData,
   JoinGameAckData,
   SimpleActionAckData,
+  SendChatMessageRequest,
 } from '../../shared/types/socket';
 import { resolvePlayerColor } from '../../shared/constants/playerColors';
 import { GameEngine } from '../engine/GameEngine';
@@ -149,6 +150,7 @@ function buildInitialGameStateFromRoom(room: Room, request: CreateGameRequest): 
       turnEndsAt: null,
       lastDiceRoll: null,
     },
+    chatMessages: [],
   };
 }
 
@@ -178,6 +180,9 @@ function resolveRawPlayerId(socket: TypedSocket): string | null {
 }
 
 function rejectAction(socket: TypedSocket, ack: SimpleActionAck, error: AckError): void {
+  if (typeof ack !== 'function') {
+    return;
+  }
   socket.emit(SERVER_EVENTS.ACTION_REJECTED, {
     code: error.code,
     message: error.message,
@@ -205,6 +210,9 @@ function completeAction(
   gameState: GameState,
   ack: SimpleActionAck,
 ): void {
+  if (typeof ack !== 'function') {
+    return;
+  }
   io.to(gameId).emit(SERVER_EVENTS.GAME_STATE_UPDATE, gameState);
   ack({ ok: true, data: { gameState } });
 }
@@ -223,12 +231,18 @@ export function registerSocketHandlers(
   io: Server<ClientToServerEvents, ServerToClientEvents>,
 ): void {
   const gameEngine = new GameEngine();
+  
+  // Verify constant is loaded on server start
+  const chatEventName = CLIENT_EVENTS.SEND_CHAT_MESSAGE || 'SEND_CHAT_MESSAGE';
+  logger.info(`[SocketInit] Registering server handlers. Chat event string: "${chatEventName}"`);
 
   io.on(SocketEvents.Connection, (socket) => {
     const handshakeGameId = normalizeId((socket.handshake.auth as Record<string, unknown>).gameId)
       ?? normalizeId((socket.handshake.query as Record<string, unknown>).gameId);
     if (handshakeGameId !== null) {
-      socket.join(handshakeGameId);
+      const room = handshakeGameId.toUpperCase();
+      socket.join(room);
+      logger.info(`Socket ${socket.id} joined room: ${room}`);
     }
 
     const handshakePlayerId = normalizeId((socket.handshake.auth as Record<string, unknown>).playerId)
@@ -236,8 +250,7 @@ export function registerSocketHandlers(
     if (handshakePlayerId !== null) {
       (socket.data as Record<string, unknown>).playerId = handshakePlayerId;
     }
-
-    logger.info(`Client connected: ${socket.id}`);
+    logger.info(`Client connected: ${socket.id} (Handshake GameID: ${handshakeGameId})`);
 
     socket.on(CLIENT_EVENTS.CREATE_GAME, (request, ack) => {
       const displayName = typeof request.displayName === 'string' ? request.displayName.trim() : '';
@@ -441,6 +454,7 @@ export function registerSocketHandlers(
 
       const updatedGameState: GameState = {
         ...engineResult.gameState,
+        chatMessages: gameState.chatMessages,
         updatedAt: new Date().toISOString(),
       };
 
@@ -494,6 +508,7 @@ export function registerSocketHandlers(
 
       const updatedGameState: GameState = {
         ...engineResult.gameState,
+        chatMessages: gameState.chatMessages,
         updatedAt: new Date().toISOString(),
       };
 
@@ -545,6 +560,7 @@ export function registerSocketHandlers(
 
       const updatedGameState: GameState = {
         ...engineResult.gameState,
+        chatMessages: gameState.chatMessages,
         updatedAt: new Date().toISOString(),
       };
 
@@ -591,6 +607,7 @@ export function registerSocketHandlers(
       const incomingState = (request as any).gameState;
       const updatedGameState: GameState = {
         ...incomingState,
+        chatMessages: gameState.chatMessages,
         updatedAt: new Date().toISOString(),
       };
 
@@ -607,6 +624,65 @@ export function registerSocketHandlers(
 
     socket.on(SocketEvents.Disconnect, () => {
       logger.info(`Client disconnected: ${socket.id}`);
+    });
+
+    socket.on(chatEventName, (request: SendChatMessageRequest, ack) => {
+      logger.info(`[Server] Received SEND_CHAT_MESSAGE from ${socket.id}:`, request);
+      try {
+        const normalizedGameId = normalizeId(request.gameId);
+        if (normalizedGameId === null) {
+          rejectAction(socket, ack, { code: 'INVALID_CONFIGURATION', message: 'Game id is required.' });
+          return;
+        }
+        const gameId = normalizedGameId.toUpperCase();
+
+        const message = request.message ? String(request.message).trim() : '';
+        const senderPlayerId = resolveRawPlayerId(socket);
+
+        if (!senderPlayerId) {
+          logger.warn(`[Chat] Rejecting message: Player ID not found for socket ${socket.id}.`);
+          rejectAction(socket, ack, { code: 'INTERNAL_ERROR', message: 'Player ID not found for chat.' });
+          return;
+        }
+        if (!message) {
+          rejectAction(socket, ack, { code: 'INVALID_CONFIGURATION', message: 'Chat message cannot be empty.' });
+          return;
+        }
+
+        const gameState = roomManager.getGameState(gameId);
+        logger.debug(`[Chat] Game state retrieved for game ${gameId}. Current messages: ${gameState?.chatMessages?.length ?? 0}`);
+        if (!gameState) {
+          rejectAction(socket, ack, { code: 'SESSION_NOT_FOUND', message: 'Game session not found.' });
+          return;
+        }
+
+        // Diagnostic: Ensure array exists on the state object before pushing
+        if (!gameState.chatMessages) {
+          logger.warn(`[Chat] chatMessages array was missing for game ${gameId}. Initializing now.`);
+          gameState.chatMessages = [];
+        }
+
+        const sender = gameState.playersById[senderPlayerId];
+        if (!sender) {
+          rejectAction(socket, ack, { code: 'INTERNAL_ERROR', message: 'Sender player not found in game state.' });
+          return;
+        }
+
+        const newChatMessage = {
+          id: `chat-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`, // Simple unique ID
+          senderId: senderPlayerId,
+          senderName: sender.displayName,
+          message,
+          timestamp: new Date().toISOString(),
+        };
+        logger.info(`[Chat] Adding new message from ${sender.displayName} (${senderPlayerId}): "${message}"`);
+        gameState.chatMessages.push(newChatMessage);
+        roomManager.setGameState(gameId, gameState); // Persist the updated state
+        completeAction(io, gameId, gameState, ack);
+      } catch (err) {
+        logger.error('[Chat] Unhandled error in SEND_CHAT_MESSAGE handler:', err);
+        rejectAction(socket, ack, { code: 'INTERNAL_ERROR', message: 'Internal server error while processing chat message.' });
+      }
     });
   });
 }

@@ -9,6 +9,14 @@ export type GamePhase = 'ROLL' | 'COLLECT' | 'ACTION' | 'END';
 
 export type ClientRole = 'PLAYER' | 'SPECTATOR';
 
+export interface ChatMessage {
+  id: string;
+  senderId: string;
+  senderName: string;
+  message: string;
+  timestamp: string; // ISO string
+}
+
 export type ResourceType = 'CRYSTAL' | 'STONE' | 'BLOOM' | 'EMBER' | 'GOLD';
 
 export type StructureType = 'ROAD' | 'SETTLEMENT' | 'GARDEN';
@@ -171,4 +179,5 @@ export interface GameState {
   playersById: Record<string, PlayerState>;
   board: BoardState;
   turn: TurnState;
+  chatMessages: ChatMessage[];
 }

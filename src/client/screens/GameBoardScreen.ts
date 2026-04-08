@@ -1,10 +1,10 @@
 import { playBuildPlacementSound, playDiceRollSound } from '../audio/buildSounds';
 import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledBoardMusicVolume } from '../audio/musicVolume';
 import { ClientEnv } from '../config/env';
-import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings } from '../settings/gameSettings';
+import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings, TEXT_SPEEDS } from '../settings/gameSettings';
 import { ScreenId } from '../../shared/constants/screenIds';
 import type { DiceRoll, GamePhase, GameState, ResourceBundle, StructureState, VertexLocation } from '../../shared/types/domain';
-import { connectSocket, endTurn, rollDice, syncGameState } from '../networking/socketClient';
+import { connectSocket, endTurn, rollDice, sendChatMessage, syncGameState } from '../networking/socketClient';
 import { clientState, setClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
 import { createDiceHud, type DiceHud } from '../ui/diceRollDisplay';
@@ -205,6 +205,9 @@ export class GameBoardScreen {
   private diceCompleteDelayTimer: ReturnType<typeof setTimeout> | null = null;
   private localDiceRollStartedAt: number | null = null;
   private rollDiceButton: HTMLButtonElement | null = null;
+  private chatPanel: HTMLDivElement | null = null;
+  private chatMessagesContainer: HTMLDivElement | null = null;
+  private chatInput: HTMLInputElement | null = null;
   private endTurnButton: HTMLButtonElement | null = null;
   private buttonContainer: HTMLElement | null = null;
   private isMusicMuted = false;
@@ -288,10 +291,12 @@ export class GameBoardScreen {
     }
     this.mountPlayerPanel(this.buttonContainer);
     this.mountTurnHud(this.buttonContainer);
+    this.mountChatPanel(this.buttonContainer);
     this.mountResourceBar(this.buttonContainer);
     if (roomId) {
       connectSocket({ gameId: roomId, playerId: session?.playerId });
       this.unsubscribe = subscribeClientState((state) => {
+        console.log('[GameBoardScreen] Client state updated. Chat messages count:', state.gameState?.chatMessages?.length);
         this.liveGameState = state.gameState;
         this.livePlayerId = state.playerId ?? this.livePlayerId;
         this.updateTurnHud();
@@ -528,13 +533,114 @@ export class GameBoardScreen {
     this.updateTurnHud();
   }
 
+  private mountChatPanel(parent: HTMLElement): void {
+    if (this.chatPanel) {
+      this.chatPanel.remove();
+    }
+
+    const panel = document.createElement('div');
+    panel.className = 'absolute right-4 flex flex-col bg-slate-900/88 border border-slate-700 rounded-lg shadow-lg overflow-hidden pointer-events-auto';
+    panel.style.bottom = `${GAME_BOARD_BOTTOM_BAR_PX + 60}px`; // Positioned higher to clear the music toggle
+    panel.style.width = '260px';
+    panel.style.height = '200px';
+    panel.style.zIndex = '100'; // Temporarily increase z-index to rule out layering issues
+    this.chatPanel = panel;
+
+    const messagesContainer = document.createElement('div');
+    messagesContainer.className = 'flex-1 overflow-y-auto p-2 text-xs text-white font-hexahaven-ui';
+    messagesContainer.className = 'flex-1 overflow-y-auto p-2 text-xs text-white font-sans';
+    messagesContainer.style.scrollbarWidth = 'thin';
+    this.chatMessagesContainer = messagesContainer;
+
+    const inputContainer = document.createElement('div');
+    inputContainer.className = 'flex border-t border-slate-700 bg-slate-800/50';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Chat...';
+    input.className = 'flex-1 bg-transparent border-none px-2 py-1.5 text-xs text-white focus:outline-none';
+    input.className = 'flex-1 bg-transparent border-none px-2 py-1.5 text-xs text-white focus:outline-none font-sans';
+    this.chatInput = input;
+
+    const sendBtn = document.createElement('button');
+    sendBtn.textContent = 'Send';
+    sendBtn.className = 'px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-cyan-400 hover:text-cyan-300 transition-colors';
+
+    sendBtn.addEventListener('click', () => this.handleSendChatMessage());
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        this.handleSendChatMessage();
+      }
+    });
+
+    inputContainer.appendChild(input);
+    inputContainer.appendChild(sendBtn);
+    panel.appendChild(messagesContainer);
+    panel.appendChild(inputContainer);
+    parent.appendChild(panel);
+  }
+
+  private handleSendChatMessage(): void {
+    if (!this.chatInput) return;
+    const message = this.chatInput.value.trim();
+    if (message.length === 0) return;
+
+    const roomId = getLobbySession()?.roomId ?? null;
+    if (roomId) {
+      void sendChatMessage(roomId, message);
+      this.chatInput.value = '';
+    }
+  }
+
   private refreshPlayerUi(): void {
     this.renderPlayerCardsFromGameState();
     this.renderResourceBarFromGameState();
     this.renderBuildingBarFromGameState();
+    this.renderChatMessages();
     this.updateMapDisplay();
   }
 
+  private renderChatMessages(): void {
+    if (!this.chatMessagesContainer || !this.liveGameState) {
+      return;
+    }
+
+    const messages = this.liveGameState.chatMessages || [];
+    this.chatMessagesContainer.innerHTML = '';
+
+    messages.forEach((msg, index) => {
+      try {
+        const div = document.createElement('div');
+        div.className = 'mb-1 leading-tight text-sm font-hexahaven-ui bg-slate-800/40 p-1 rounded';
+        div.className = 'mb-1 leading-tight text-sm font-sans bg-slate-800/40 p-1 rounded';
+        
+        const sender = this.liveGameState?.playersById[msg.senderId];
+        const color = sender?.color || '#cbd5e1';
+        const name = msg.senderName || 'Unknown'; // Fallback to 'Unknown' if senderName is missing
+
+        // Format timestamp to [HH:MM]
+        const date = new Date(msg.timestamp);
+        const timeString = `[${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}]`;
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'font-bold';
+        nameSpan.style.color = color;
+        nameSpan.textContent = `${timeString} ${name}: `; // Prepend timestamp
+
+        const msgSpan = document.createElement('span');
+        msgSpan.className = 'text-white';
+        msgSpan.textContent = msg.message || '[Empty Message]';
+
+        div.appendChild(nameSpan);
+        div.appendChild(msgSpan);
+        this.chatMessagesContainer!.appendChild(div);
+      } catch (err) {
+        console.error(`[Chat] Failed to render message at index ${index}:`, err);
+      }
+    });
+
+    this.chatMessagesContainer.scrollTop = this.chatMessagesContainer.scrollHeight;
+  }
   private renderPlayerCardsFromGameState(): void {
     const gameState = this.liveGameState;
     if (!this.playerPanel || !gameState) {
@@ -1633,6 +1739,12 @@ export class GameBoardScreen {
     this.rollDiceButton = null;
     this.endTurnButton = null;
     this.buttonContainer = null;
+    if (this.chatPanel) {
+      this.chatPanel.remove();
+      this.chatPanel = null;
+    }
+    this.chatMessagesContainer = null;
+    this.chatInput = null;
     this.mapScreen?.destroy();
     this.mapScreen = null;
     this.liveGameState = null;
