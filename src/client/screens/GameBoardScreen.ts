@@ -4,7 +4,7 @@ import { ClientEnv } from '../config/env';
 import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings } from '../settings/gameSettings';
 import { ScreenId } from '../../shared/constants/screenIds';
 import type { DiceRoll, GamePhase, GameState, ResourceBundle, StructureState, VertexLocation } from '../../shared/types/domain';
-import { connectSocket, endTurn, rollDice, syncGameState } from '../networking/socketClient';
+import { bankTrade, connectSocket, endTurn, rollDice, syncGameState } from '../networking/socketClient';
 import { clientState, setClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
 import { createDiceHud, type DiceHud } from '../ui/diceRollDisplay';
@@ -205,6 +205,7 @@ export class GameBoardScreen {
   private diceCompleteDelayTimer: ReturnType<typeof setTimeout> | null = null;
   private localDiceRollStartedAt: number | null = null;
   private rollDiceButton: HTMLButtonElement | null = null;
+  private bankTradeButton: HTMLButtonElement | null = null;
   private endTurnButton: HTMLButtonElement | null = null;
   private buttonContainer: HTMLElement | null = null;
   private isMusicMuted = false;
@@ -506,7 +507,14 @@ export class GameBoardScreen {
     endTurnButton.textContent = 'End Turn';
     endTurnButton.addEventListener('click', () => this.handleEndTurnClick());
 
+    const bankTradeButton = document.createElement('button');
+    bankTradeButton.className = 'font-hexahaven-ui rounded-md border border-amber-400/60 bg-amber-900/60 px-2 py-2 text-xs font-semibold';
+    bankTradeButton.textContent = '4 Ember → 1 Stone';
+    bankTradeButton.addEventListener('click', () => this.handleBankTradeClick());
+
+    actions.appendChild(rollDiceButton);
     actions.appendChild(endTurnButton);
+    actions.appendChild(bankTradeButton);
 
     panel.appendChild(header);
     panel.appendChild(currentPlayerLabel);
@@ -522,6 +530,7 @@ export class GameBoardScreen {
     this.diceHud = diceHud;
     this.rollDiceButton = rollDiceButton;
     this.endTurnButton = endTurnButton;
+    this.bankTradeButton = bankTradeButton;
 
     parent.appendChild(panel);
     parent.appendChild(dicePanel);
@@ -1235,6 +1244,12 @@ export class GameBoardScreen {
       this.endTurnButton.style.opacity = this.endTurnButton.disabled ? '0.55' : '1';
       this.endTurnButton.style.cursor = this.endTurnButton.disabled ? 'not-allowed' : 'pointer';
     }
+    if (this.bankTradeButton) {
+      const canBankTrade = Boolean(isActivePlayer && currentPhase === 'ACTION');
+      this.bankTradeButton.disabled = !canBankTrade;
+      this.bankTradeButton.style.opacity = this.bankTradeButton.disabled ? '0.55' : '1';
+      this.bankTradeButton.style.cursor = this.bankTradeButton.disabled ? 'not-allowed' : 'pointer';
+    }
   }
 
   private asDiceRoll(raw: unknown): DiceRoll | null {
@@ -1344,6 +1359,21 @@ export class GameBoardScreen {
       this.startLocalDiceRollAnimation();
       void rollDice(roomId);
     }
+  }
+
+  private handleBankTradeClick(): void {
+    const roomId = getLobbySession()?.roomId ?? null;
+    if (!roomId) {
+      return;
+    }
+
+    void bankTrade({
+      gameId: roomId,
+      giveResource: 'EMBER',
+      receiveResource: 'STONE',
+    }).catch((error) => {
+      console.error('Bank trade failed:', error);
+    });
   }
 
   private handleEndTurnClick(): void {
@@ -1632,6 +1662,7 @@ export class GameBoardScreen {
     this.diceHud = null;
     this.rollDiceButton = null;
     this.endTurnButton = null;
+    this.bankTradeButton = null;
     this.buttonContainer = null;
     this.mapScreen?.destroy();
     this.mapScreen = null;
