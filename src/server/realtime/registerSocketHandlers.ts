@@ -1,4 +1,5 @@
 import type { Server, Socket } from 'socket.io';
+import { TradeManager } from '../engine/TradeManager';
 import { defaultStartingResourceBundle } from '../../shared/constants/startingResources';
 import { CLIENT_EVENTS, SERVER_EVENTS, SocketEvents } from '../../shared/constants/socketEvents';
 import type { GameState, PlayerStats, ResourceBundle } from '../../shared/types/domain';
@@ -223,6 +224,7 @@ export function registerSocketHandlers(
   io: Server<ClientToServerEvents, ServerToClientEvents>,
 ): void {
   const gameEngine = new GameEngine();
+  const tradeManager = new TradeManager();
 
   io.on(SocketEvents.Connection, (socket) => {
     const handshakeGameId = normalizeId((socket.handshake.auth as Record<string, unknown>).gameId)
@@ -501,6 +503,63 @@ export function registerSocketHandlers(
         rejectAction(socket, ack, {
           code: 'SESSION_NOT_FOUND',
           message: 'Unable to store game state for ROLL_DICE.',
+        });
+        return;
+      }
+
+      completeAction(io, gameId, updatedGameState, ack);
+    });
+
+        socket.on(CLIENT_EVENTS.BANK_TRADE, (request, ack) => {
+      const normalizedGameId = normalizeId((request as any).gameId);
+      if (normalizedGameId === null) {
+        rejectAction(socket, ack, {
+          code: 'INVALID_CONFIGURATION',
+          message: 'Game id is required.',
+        });
+        return;
+      }
+      const gameId = normalizedGameId.toUpperCase();
+
+      const gameState = roomManager.getGameState(gameId);
+      if (!gameState) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Session not found for BANK_TRADE.',
+        });
+        return;
+      }
+
+      const playerId = resolvePlayerId(socket, gameState);
+      if (playerId === null) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Player session not found for BANK_TRADE.',
+        });
+        return;
+      }
+
+      const result = tradeManager.bankTrade(
+        gameState,
+        playerId,
+        (request as any).giveResource,
+        (request as any).receiveResource,
+      );
+
+      if (!result.ok) {
+        rejectAction(socket, ack, result.error);
+        return;
+      }
+
+      const updatedGameState: GameState = {
+        ...result.gameState,
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (!roomManager.setGameState(gameId, updatedGameState)) {
+        rejectAction(socket, ack, {
+          code: 'SESSION_NOT_FOUND',
+          message: 'Unable to store game state for BANK_TRADE.',
         });
         return;
       }

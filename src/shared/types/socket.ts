@@ -22,6 +22,7 @@ export interface AckError {
     | 'NOT_ACTIVE_PLAYER'
     | 'INVALID_PHASE'
     | 'MANDATORY_ACTION_INCOMPLETE'
+    | 'INSUFFICIENT_RESOURCES'
     | 'INTERNAL_ERROR';
   message: string;
   details?: Record<string, unknown>;
@@ -54,6 +55,12 @@ export interface RollDiceRequest {
 
 export interface EndTurnRequest {
   gameId: string;
+}
+
+export interface BankTradeRequest {
+  gameId: string;
+  giveResource: 'EMBER' | 'GOLD' | 'STONE' | 'BLOOM' | 'CRYSTAL';
+  receiveResource: 'EMBER' | 'GOLD' | 'STONE' | 'BLOOM' | 'CRYSTAL';
 }
 
 export interface SyncGameStateRequest {
@@ -109,6 +116,10 @@ export interface ClientToServerEvents {
   ) => void;
   ROLL_DICE: (
     request: RollDiceRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  BANK_TRADE: (
+    request: BankTradeRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,
   ) => void;
   END_TURN: (
