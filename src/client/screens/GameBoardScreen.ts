@@ -1,10 +1,10 @@
 import { playBuildPlacementSound, playDiceRollSound } from '../audio/buildSounds';
 import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledBoardMusicVolume } from '../audio/musicVolume';
 import { ClientEnv } from '../config/env';
-import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings } from '../settings/gameSettings';
+import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings, TEXT_SPEEDS } from '../settings/gameSettings';
 import { ScreenId } from '../../shared/constants/screenIds';
 import type { DiceRoll, GamePhase, GameState, ResourceBundle, StructureState, VertexLocation } from '../../shared/types/domain';
-import { bankTrade, connectSocket, endTurn, rollDice, syncGameState } from '../networking/socketClient';
+import { bankTrade, connectSocket, endTurn, rollDice, sendChatMessage, syncGameState } from '../networking/socketClient';
 import { clientState, setClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
 import { createDiceHud, type DiceHud } from '../ui/diceRollDisplay';
@@ -205,6 +205,9 @@ export class GameBoardScreen {
   private diceCompleteDelayTimer: number | null = null;
   private localDiceRollStartedAt: number | null = null;
   private rollDiceButton: HTMLButtonElement | null = null;
+  private chatPanel: HTMLDivElement | null = null;
+  private chatMessagesContainer: HTMLDivElement | null = null;
+  private chatInput: HTMLInputElement | null = null;
   private bankTradeButton: HTMLButtonElement | null = null;
   private endTurnButton: HTMLButtonElement | null = null;
   private bankGiveSelection: ResourceKey = 'EMBER';
@@ -293,10 +296,12 @@ export class GameBoardScreen {
     }
     this.mountPlayerPanel(this.buttonContainer);
     this.mountTurnHud(this.buttonContainer);
+    this.mountChatPanel(this.buttonContainer);
     this.mountResourceBar(this.buttonContainer);
     if (roomId) {
       connectSocket({ gameId: roomId, playerId: session?.playerId });
       this.unsubscribe = subscribeClientState((state) => {
+        console.log('[GameBoardScreen] Client state updated. Chat messages count:', state.gameState?.chatMessages?.length);
         this.liveGameState = state.gameState;
         this.livePlayerId = state.playerId ?? this.livePlayerId;
         this.updateTurnHud();
@@ -358,30 +363,25 @@ export class GameBoardScreen {
       navigateTo(ScreenId.MainMenu);
     });
     topRight.appendChild(this.settingsButton);
-    topRight.appendChild(this.exitButton);
-    this.topRightContainer = topRight;
-    this.buttonContainer.appendChild(topRight);
-
     this.musicToggleButton = document.createElement('button');
     this.musicToggleButton.type = 'button';
-    this.musicToggleButton.style.position = 'absolute';
-    /** Sits on the bottom bar: overlap ~half the button with the bar; +38px total lift (incl. ~0.2cm @ 96dpi). */
-    this.musicToggleButton.style.bottom = `${Math.max(12, GAME_BOARD_BOTTOM_BAR_PX - 32 + 38)}px`;
-    this.musicToggleButton.style.right = '16px';
-    this.musicToggleButton.style.zIndex = '10';
     this.musicToggleButton.style.display = 'flex';
     this.musicToggleButton.style.alignItems = 'center';
     this.musicToggleButton.style.justifyContent = 'center';
-    this.musicToggleButton.style.width = '44px';
-    this.musicToggleButton.style.height = '44px';
+    this.musicToggleButton.style.width = '40px';
+    this.musicToggleButton.style.height = '40px';
+    this.musicToggleButton.style.padding = '0';
     this.musicToggleButton.style.color = '#ffffff';
     this.musicToggleButton.style.background = 'rgba(15, 23, 42, 0.85)';
     this.musicToggleButton.style.border = '1px solid rgba(255, 255, 255, 0.35)';
-    this.musicToggleButton.style.borderRadius = '9999px';
+    this.musicToggleButton.style.borderRadius = '8px';
     this.musicToggleButton.style.cursor = 'pointer';
     this.musicToggleButton.addEventListener('click', () => this.toggleMusic());
     this.updateMusicButtonIcon();
-    this.buttonContainer.appendChild(this.musicToggleButton);
+    topRight.appendChild(this.musicToggleButton);
+    topRight.appendChild(this.exitButton);
+    this.topRightContainer = topRight;
+    this.buttonContainer.appendChild(topRight);
   }
 
   private mountPlayerPanel(parent: HTMLElement): void {
@@ -389,7 +389,7 @@ export class GameBoardScreen {
       this.playerPanel.remove();
     }
     const panel = document.createElement('div');
-    panel.className = 'absolute top-16 left-4 flex flex-col gap-2';
+    panel.className = 'absolute top-4 left-4 flex flex-col gap-2';
     panel.style.zIndex = '3';
     panel.style.width = '128px';
     this.playerPanel = panel;
@@ -446,15 +446,15 @@ export class GameBoardScreen {
     this.bankReceiveButtons = {};
 
     const panel = document.createElement('div');
-    panel.className = 'absolute top-16 right-4 rounded-xl border border-slate-600 bg-slate-900/88 px-4 py-3 text-white shadow-md';
+    panel.className = 'absolute top-16 right-4 rounded-xl border border-slate-600 bg-slate-900/88 px-3 py-2 text-white shadow-md';
     panel.style.zIndex = '3';
-    panel.style.width = '250px';
+    panel.style.width = '260px';
 
     const header = document.createElement('div');
     header.className = 'mb-2 flex items-center justify-between gap-2';
 
     const title = document.createElement('div');
-    title.className = 'font-hexahaven-ui text-sm font-semibold';
+    title.className = 'font-hexahaven-ui text-xs font-semibold';
     title.textContent = 'Turn HUD (DEMO)';
     header.appendChild(title);
 
@@ -468,18 +468,18 @@ export class GameBoardScreen {
     }
 
     const currentPlayerLabel = document.createElement('div');
-    currentPlayerLabel.className = 'font-hexahaven-ui text-xs text-slate-300';
+    currentPlayerLabel.className = 'font-hexahaven-ui text-[10px] text-slate-300';
     currentPlayerLabel.textContent = 'Current Player';
 
     const currentPlayerValue = document.createElement('div');
-    currentPlayerValue.className = 'font-hexahaven-ui text-sm font-semibold mb-2';
+    currentPlayerValue.className = 'font-hexahaven-ui text-xs font-semibold mb-1.5';
 
     const currentPhaseLabel = document.createElement('div');
-    currentPhaseLabel.className = 'font-hexahaven-ui text-xs text-slate-300';
+    currentPhaseLabel.className = 'font-hexahaven-ui text-[10px] text-slate-300';
     currentPhaseLabel.textContent = 'Current Phase';
 
     const currentPhaseValue = document.createElement('div');
-    currentPhaseValue.className = 'font-hexahaven-ui text-sm font-semibold mb-2';
+    currentPhaseValue.className = 'font-hexahaven-ui text-xs font-semibold mb-1.5';
 
     const diceHud = createDiceHud();
     diceHud.root.style.marginBottom = '0';
@@ -506,12 +506,12 @@ export class GameBoardScreen {
     dicePanel.appendChild(rollDiceButton);
 
     const actions = document.createElement('div');
-    actions.className = 'flex flex-col gap-2';
+    actions.className = 'flex flex-col gap-1.5';
 
     const endTurnButton = document.createElement('button');
     endTurnButton.type = 'button';
     endTurnButton.className =
-      'font-hexahaven-ui rounded-md border border-emerald-400/60 bg-emerald-900/60 px-2 py-2 text-xs font-semibold';
+      'font-hexahaven-ui rounded-md border border-emerald-400/60 bg-emerald-900/60 px-2 py-1.5 text-[11px] font-semibold';
     endTurnButton.textContent = 'End Turn';
     endTurnButton.addEventListener('click', () => this.handleEndTurnClick());
 
@@ -639,13 +639,119 @@ export class GameBoardScreen {
     this.updateTurnHud();
   }
 
+  private mountChatPanel(parent: HTMLElement): void {
+    if (this.chatPanel) {
+      this.chatPanel.remove();
+    }
+
+    const panel = document.createElement('div');
+    panel.className = 'absolute right-4 flex flex-col bg-slate-900/88 border border-slate-700 rounded-lg shadow-lg overflow-hidden pointer-events-auto';
+    panel.style.bottom = `${GAME_BOARD_BOTTOM_BAR_PX + 10}px`;
+    panel.style.width = '260px';
+    panel.style.height = '160px';
+    panel.style.zIndex = '100'; // Temporarily increase z-index to rule out layering issues
+    this.chatPanel = panel;
+    requestAnimationFrame(() => {
+      if (this.chatPanel && this.diceHudPanel) {
+        this.chatPanel.style.height = `${this.diceHudPanel.offsetHeight}px`;
+      }
+    });
+
+    const messagesContainer = document.createElement('div');
+    messagesContainer.className = 'flex-1 overflow-y-auto p-2 text-xs text-white font-hexahaven-ui';
+    messagesContainer.className = 'flex-1 overflow-y-auto p-2 text-xs text-white font-sans';
+    messagesContainer.style.scrollbarWidth = 'thin';
+    this.chatMessagesContainer = messagesContainer;
+
+    const inputContainer = document.createElement('div');
+    inputContainer.className = 'flex border-t border-slate-700 bg-slate-800/50';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Chat...';
+    input.className = 'flex-1 bg-transparent border-none px-2 py-1.5 text-xs text-white focus:outline-none';
+    input.className = 'flex-1 bg-transparent border-none px-2 py-1.5 text-xs text-white focus:outline-none font-sans';
+    this.chatInput = input;
+
+    const sendBtn = document.createElement('button');
+    sendBtn.textContent = 'Send';
+    sendBtn.className = 'px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-cyan-400 hover:text-cyan-300 transition-colors';
+
+    sendBtn.addEventListener('click', () => this.handleSendChatMessage());
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        this.handleSendChatMessage();
+      }
+    });
+
+    inputContainer.appendChild(input);
+    inputContainer.appendChild(sendBtn);
+    panel.appendChild(messagesContainer);
+    panel.appendChild(inputContainer);
+    parent.appendChild(panel);
+  }
+
+  private handleSendChatMessage(): void {
+    if (!this.chatInput) return;
+    const message = this.chatInput.value.trim();
+    if (message.length === 0) return;
+
+    const roomId = getLobbySession()?.roomId ?? null;
+    if (roomId) {
+      void sendChatMessage(roomId, message);
+      this.chatInput.value = '';
+    }
+  }
+
   private refreshPlayerUi(): void {
     this.renderPlayerCardsFromGameState();
     this.renderResourceBarFromGameState();
     this.renderBuildingBarFromGameState();
+    this.renderChatMessages();
     this.updateMapDisplay();
   }
 
+  private renderChatMessages(): void {
+    if (!this.chatMessagesContainer || !this.liveGameState) {
+      return;
+    }
+
+    const messages = this.liveGameState.chatMessages || [];
+    this.chatMessagesContainer.innerHTML = '';
+
+    messages.forEach((msg, index) => {
+      try {
+        const div = document.createElement('div');
+        div.className = 'mb-1 leading-tight text-sm font-hexahaven-ui bg-slate-800/40 p-1 rounded';
+        div.className = 'mb-1 leading-tight text-sm font-sans bg-slate-800/40 p-1 rounded';
+        
+        const sender = this.liveGameState?.playersById[msg.senderId];
+        const color = sender?.color || '#cbd5e1';
+        const name = msg.senderName || 'Unknown'; // Fallback to 'Unknown' if senderName is missing
+
+        // Format timestamp to [HH:MM]
+        const date = new Date(msg.timestamp);
+        const timeString = `[${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}]`;
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'font-bold';
+        nameSpan.style.color = color;
+        nameSpan.textContent = `${timeString} ${name}: `; // Prepend timestamp
+
+        const msgSpan = document.createElement('span');
+        msgSpan.className = 'text-white';
+        msgSpan.textContent = msg.message || '[Empty Message]';
+
+        div.appendChild(nameSpan);
+        div.appendChild(msgSpan);
+        this.chatMessagesContainer!.appendChild(div);
+      } catch (err) {
+        console.error(`[Chat] Failed to render message at index ${index}:`, err);
+      }
+    });
+
+    this.chatMessagesContainer.scrollTop = this.chatMessagesContainer.scrollHeight;
+  }
   private renderPlayerCardsFromGameState(): void {
     const gameState = this.liveGameState;
     if (!this.playerPanel || !gameState) {
@@ -1839,6 +1945,12 @@ export class GameBoardScreen {
     this.bankGiveSelection = 'EMBER';
     this.bankReceiveSelection = 'STONE';
     this.buttonContainer = null;
+    if (this.chatPanel) {
+      this.chatPanel.remove();
+      this.chatPanel = null;
+    }
+    this.chatMessagesContainer = null;
+    this.chatInput = null;
     this.mapScreen?.destroy();
     this.mapScreen = null;
     this.liveGameState = null;
