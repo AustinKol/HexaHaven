@@ -1,210 +1,545 @@
 import type { Server, Socket } from 'socket.io';
+import { CLIENT_EVENTS, SERVER_EVENTS, SocketEvents } from '../../shared/constants/socketEvents';
+import type { GameState } from '../../shared/types/domain';
 import type {
-  ClientToServerEvents,
-  ServerToClientEvents,
-  CreateGameRequest,
-  JoinGameRequest,
-  StartGameRequest,
-  RollDiceRequest,
-  EndTurnRequest,
-  SocketAck,
-  CreateGameAckData,
-  JoinGameAckData,
-  SimpleActionAckData,
   AckError,
+  BankTradeRequest,
+  ClientToServerEvents,
+  CreateGameAckData,
+  CreateGameRequest,
+  EndTurnRequest,
+  JoinGameAckData,
+  JoinGameRequest,
+  RollDiceRequest,
+  SendChatMessageRequest,
+  ServerToClientEvents,
+  SimpleActionAckData,
+  SocketAck,
+  StartGameRequest,
+  SyncGameStateRequest,
 } from '../../shared/types/socket';
-import { SocketEvents, CLIENT_EVENTS } from '../../shared/constants/socketEvents';
 import { gamePersistenceService } from '../persistence/GamePersistenceService';
 import { logger } from '../utils/logger';
 
 type TypedServer = Server<ClientToServerEvents, ServerToClientEvents>;
 type TypedSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
+type SimpleActionAck = (response: SocketAck<SimpleActionAckData>) => void;
+type CreateOrJoinAck<T extends CreateGameAckData | JoinGameAckData> = (response: SocketAck<T>) => void;
 
-// Maps socket.id → { gameId, playerId } for quick lookup on disconnect / events
-const socketPlayerMap = new Map<string, { gameId: string; playerId: string }>();
+interface SocketSession {
+  gameId: string;
+  roomCode: string;
+  playerId: string;
+}
 
-function errorAck(code: AckError['code'], message: string): { ok: false; error: AckError } {
-  return { ok: false, error: { code, message } };
+const socketPlayerMap = new Map<string, SocketSession>();
+
+function normalizeId(rawValue: unknown): string | null {
+  if (typeof rawValue === 'string') {
+    const value = rawValue.trim();
+    return value.length > 0 ? value : null;
+  }
+
+  if (Array.isArray(rawValue) && rawValue.length > 0) {
+    return normalizeId(rawValue[0]);
+  }
+
+  return null;
+}
+
+function resolvePlayerCount(requestedCount: unknown): number | null {
+  if (typeof requestedCount !== 'number' || !Number.isFinite(requestedCount)) {
+    return null;
+  }
+
+  const rounded = Math.trunc(requestedCount);
+  if (rounded < 2 || rounded > 4) {
+    return null;
+  }
+
+  return rounded;
+}
+
+function buildAckError(
+  code: AckError['code'],
+  message: string,
+  details?: Record<string, unknown>,
+): AckError {
+  const error: AckError = { code, message };
+  if (details !== undefined) {
+    error.details = details;
+  }
+  return error;
+}
+
+function resolveErrorCode(message: string): AckError['code'] {
+  const normalized = message.toLowerCase();
+
+  if (
+    normalized.includes('display name')
+    || normalized.includes('join code')
+    || normalized.includes('game id is required')
+    || normalized.includes('invalid player count')
+    || normalized.includes('invalid resource type')
+    || normalized.includes('must be different')
+    || normalized.includes('cannot be empty')
+    || normalized.includes('need at least 2 players')
+  ) {
+    return 'INVALID_CONFIGURATION';
+  }
+
+  if (normalized.includes('full')) {
+    return 'PLAYER_CAPACITY_EXCEEDED';
+  }
+
+  if (normalized.includes('host')) {
+    return 'NOT_HOST';
+  }
+
+  if (normalized.includes('active player')) {
+    return 'NOT_ACTIVE_PLAYER';
+  }
+
+  if (
+    normalized.includes('phase')
+    || normalized.includes('active game')
+    || normalized.includes('already started')
+    || normalized.includes('accepting new players')
+  ) {
+    return 'INVALID_PHASE';
+  }
+
+  if (normalized.includes('need 4') || normalized.includes('insufficient')) {
+    return 'INSUFFICIENT_RESOURCES';
+  }
+
+  if (
+    normalized.includes('not found')
+    || normalized.includes('no game found')
+    || normalized.includes('game not found')
+    || normalized.includes('player not found')
+  ) {
+    return 'SESSION_NOT_FOUND';
+  }
+
+  return 'INTERNAL_ERROR';
+}
+
+function emitActionRejected(socket: TypedSocket, error: AckError): void {
+  socket.emit(SERVER_EVENTS.ACTION_REJECTED, {
+    code: error.code,
+    message: error.message,
+    details: error.details,
+  });
+}
+
+function rejectAction(
+  socket: TypedSocket,
+  ack: SimpleActionAck,
+  code: AckError['code'],
+  message: string,
+  details?: Record<string, unknown>,
+): void {
+  const error = buildAckError(code, message, details);
+  emitActionRejected(socket, error);
+  if (typeof ack === 'function') {
+    ack({ ok: false, error });
+  }
+}
+
+function rejectCreateOrJoin<T extends CreateGameAckData | JoinGameAckData>(
+  socket: TypedSocket,
+  ack: CreateOrJoinAck<T>,
+  code: AckError['code'],
+  message: string,
+  details?: Record<string, unknown>,
+): void {
+  const error = buildAckError(code, message, details);
+  emitActionRejected(socket, error);
+  if (typeof ack === 'function') {
+    ack({ ok: false, error });
+  }
+}
+
+function completeAction(
+  io: TypedServer,
+  gameId: string,
+  gameState: GameState,
+  ack: SimpleActionAck,
+): void {
+  io.to(gameId).emit(SERVER_EVENTS.GAME_STATE_UPDATE, gameState);
+  if (typeof ack === 'function') {
+    ack({ ok: true, data: { gameState } });
+  }
+}
+
+function completeCreateOrJoin<T extends CreateGameAckData | JoinGameAckData>(
+  io: TypedServer,
+  gameId: string,
+  payload: T,
+  ack: CreateOrJoinAck<T>,
+): void {
+  io.to(gameId).emit(SERVER_EVENTS.GAME_STATE_UPDATE, payload.gameState);
+  if (typeof ack === 'function') {
+    ack({ ok: true, data: payload });
+  }
+}
+
+function completeSync(socket: TypedSocket, ack: SimpleActionAck, gameState: GameState): void {
+  socket.emit(SERVER_EVENTS.GAME_STATE_UPDATE, gameState);
+  if (typeof ack === 'function') {
+    ack({ ok: true, data: { gameState } });
+  }
+}
+
+function rememberSocketSession(
+  socket: TypedSocket,
+  gameState: GameState,
+  playerId: string,
+): SocketSession {
+  const session: SocketSession = {
+    gameId: gameState.gameId,
+    roomCode: gameState.roomCode,
+    playerId,
+  };
+
+  socket.join(gameState.gameId);
+  socketPlayerMap.set(socket.id, session);
+
+  const socketData = socket.data as Record<string, unknown>;
+  socketData.gameId = gameState.gameId;
+  socketData.roomCode = gameState.roomCode;
+  socketData.playerId = playerId;
+
+  return session;
+}
+
+function sessionMatchesIdentifier(session: SocketSession, identifier: string): boolean {
+  return identifier === session.gameId || identifier.toUpperCase() === session.roomCode;
+}
+
+function resolveRawPlayerId(socket: TypedSocket): string | null {
+  return socketPlayerMap.get(socket.id)?.playerId
+    ?? normalizeId((socket.data as Record<string, unknown>).playerId)
+    ?? normalizeId((socket.handshake.auth as Record<string, unknown>).playerId)
+    ?? normalizeId((socket.handshake.query as Record<string, unknown>).playerId);
+}
+
+async function resolveSocketSession(
+  socket: TypedSocket,
+  requestedIdentifier: string,
+): Promise<SocketSession | null> {
+  const mappedSession = socketPlayerMap.get(socket.id);
+  if (mappedSession && sessionMatchesIdentifier(mappedSession, requestedIdentifier)) {
+    return mappedSession;
+  }
+
+  const playerId = resolveRawPlayerId(socket);
+  if (playerId === null) {
+    return null;
+  }
+
+  const gameState = await gamePersistenceService.getGameState(requestedIdentifier);
+  if (!gameState || !gameState.playersById[playerId]) {
+    return null;
+  }
+
+  return rememberSocketSession(socket, gameState, playerId);
+}
+
+async function restoreSocketSessionFromHandshake(socket: TypedSocket): Promise<void> {
+  const handshakeIdentifier = normalizeId((socket.handshake.auth as Record<string, unknown>).gameId)
+    ?? normalizeId((socket.handshake.query as Record<string, unknown>).gameId);
+
+  if (handshakeIdentifier === null) {
+    return;
+  }
+
+  try {
+    const session = await resolveSocketSession(socket, handshakeIdentifier);
+    if (session !== null) {
+      logger.info(`Socket ${socket.id} restored session for ${session.gameId}`);
+    }
+  } catch (error) {
+    logger.warn(`Failed to restore socket session for ${socket.id}: ${(error as Error).message}`);
+  }
 }
 
 export function registerSocketHandlers(io: TypedServer): void {
   io.on(SocketEvents.Connection, (socket: TypedSocket) => {
     logger.info(`Client connected: ${socket.id}`);
+    void restoreSocketSessionFromHandshake(socket);
 
-    // ─── CREATE_GAME ────────────────────────────────────────────────────
     socket.on(
       CLIENT_EVENTS.CREATE_GAME,
       async (
         request: CreateGameRequest,
-        ack: (response: SocketAck<CreateGameAckData>) => void,
+        ack: CreateOrJoinAck<CreateGameAckData>,
       ) => {
+        const displayName = typeof request.displayName === 'string' ? request.displayName.trim() : '';
+        const config = request.config;
+        const playerCount = resolvePlayerCount(config?.playerCount);
+
+        if (!displayName) {
+          rejectCreateOrJoin(socket, ack, 'INVALID_CONFIGURATION', 'Display name is required.');
+          return;
+        }
+
+        if (!config || playerCount === null) {
+          rejectCreateOrJoin(socket, ack, 'INVALID_CONFIGURATION', 'Invalid player count.');
+          return;
+        }
+
         try {
-          const { gameState, playerId } = await gamePersistenceService.createGame(
-            request.displayName,
-            request.config,
-          );
-
-          // Join socket room for broadcasts
-          socket.join(gameState.gameId);
-          socketPlayerMap.set(socket.id, { gameId: gameState.gameId, playerId });
-
-          ack({
-            ok: true,
-            data: {
-              clientId: socket.id,
-              playerId,
-              role: 'PLAYER',
-              gameState,
-            },
+          const { gameState, playerId } = await gamePersistenceService.createGame(displayName, {
+            ...config,
+            playerCount,
           });
-        } catch (err) {
-          logger.error('CREATE_GAME failed:', err);
-          ack(errorAck('INTERNAL_ERROR', (err as Error).message));
+
+          rememberSocketSession(socket, gameState, playerId);
+
+          completeCreateOrJoin(io, gameState.gameId, {
+            clientId: socket.id,
+            playerId,
+            role: 'PLAYER',
+            gameState,
+          }, ack);
+        } catch (error) {
+          logger.error('CREATE_GAME failed:', error);
+          const message = (error as Error).message;
+          rejectCreateOrJoin(socket, ack, resolveErrorCode(message), message);
         }
       },
     );
 
-    // ─── JOIN_GAME ──────────────────────────────────────────────────────
     socket.on(
       CLIENT_EVENTS.JOIN_GAME,
       async (
         request: JoinGameRequest,
-        ack: (response: SocketAck<JoinGameAckData>) => void,
+        ack: CreateOrJoinAck<JoinGameAckData>,
       ) => {
+        const joinCode = typeof request.joinCode === 'string' ? request.joinCode.trim().toUpperCase() : '';
+        const displayName = typeof request.displayName === 'string' ? request.displayName.trim() : '';
+
+        if (!joinCode) {
+          rejectCreateOrJoin(socket, ack, 'INVALID_CONFIGURATION', 'Join code is required.');
+          return;
+        }
+
+        if (!displayName) {
+          rejectCreateOrJoin(socket, ack, 'INVALID_CONFIGURATION', 'Display name is required.');
+          return;
+        }
+
         try {
-          const { gameState, playerId } = await gamePersistenceService.joinGame(
-            request.joinCode,
-            request.displayName,
-          );
+          const { gameState, playerId } = await gamePersistenceService.joinGame(joinCode, displayName);
 
-          socket.join(gameState.gameId);
-          socketPlayerMap.set(socket.id, { gameId: gameState.gameId, playerId });
+          rememberSocketSession(socket, gameState, playerId);
 
-          // Ack the joining player
-          ack({
-            ok: true,
-            data: {
-              clientId: socket.id,
-              playerId,
-              role: request.role,
-              gameState,
-            },
-          });
-
-          // Broadcast updated state to all other players in the room
-          socket.to(gameState.gameId).emit('GAME_STATE_UPDATE', gameState);
-        } catch (err) {
-          logger.error('JOIN_GAME failed:', err);
-          const message = (err as Error).message;
-          const code: AckError['code'] = message.includes('not found')
-            ? 'SESSION_NOT_FOUND'
-            : message.includes('full')
-              ? 'PLAYER_CAPACITY_EXCEEDED'
-              : 'INTERNAL_ERROR';
-          ack(errorAck(code, message));
+          completeCreateOrJoin(io, gameState.gameId, {
+            clientId: socket.id,
+            playerId,
+            role: request.role,
+            gameState,
+          }, ack);
+        } catch (error) {
+          logger.error('JOIN_GAME failed:', error);
+          const message = (error as Error).message;
+          rejectCreateOrJoin(socket, ack, resolveErrorCode(message), message);
         }
       },
     );
 
-    // ─── START_GAME ─────────────────────────────────────────────────────
     socket.on(
       CLIENT_EVENTS.START_GAME,
       async (
         request: StartGameRequest,
-        ack: (response: SocketAck<SimpleActionAckData>) => void,
+        ack: SimpleActionAck,
       ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
+
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for START_GAME.');
+          return;
+        }
+
         try {
-          const mapping = socketPlayerMap.get(socket.id);
-          if (!mapping || mapping.gameId !== request.gameId) {
-            ack(errorAck('SESSION_NOT_FOUND', 'You are not in this game'));
-            return;
-          }
-
-          const gameState = await gamePersistenceService.startGame(
-            request.gameId,
-            mapping.playerId,
-          );
-
-          ack({ ok: true, data: { gameState } });
-          socket.to(gameState.gameId).emit('GAME_STATE_UPDATE', gameState);
-        } catch (err) {
-          logger.error('START_GAME failed:', err);
-          const message = (err as Error).message;
-          const code: AckError['code'] = message.includes('host')
-            ? 'NOT_HOST'
-            : 'INTERNAL_ERROR';
-          ack(errorAck(code, message));
+          const gameState = await gamePersistenceService.startGame(session.gameId, session.playerId);
+          rememberSocketSession(socket, gameState, session.playerId);
+          completeAction(io, gameState.gameId, gameState, ack);
+        } catch (error) {
+          logger.error('START_GAME failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
         }
       },
     );
 
-    // ─── ROLL_DICE ──────────────────────────────────────────────────────
     socket.on(
       CLIENT_EVENTS.ROLL_DICE,
       async (
         request: RollDiceRequest,
-        ack: (response: SocketAck<SimpleActionAckData>) => void,
+        ack: SimpleActionAck,
       ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
+
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for ROLL_DICE.');
+          return;
+        }
+
         try {
-          const mapping = socketPlayerMap.get(socket.id);
-          if (!mapping || mapping.gameId !== request.gameId) {
-            ack(errorAck('SESSION_NOT_FOUND', 'You are not in this game'));
-            return;
-          }
-
-          const gameState = await gamePersistenceService.rollDice(
-            request.gameId,
-            mapping.playerId,
-          );
-
-          ack({ ok: true, data: { gameState } });
-          socket.to(gameState.gameId).emit('GAME_STATE_UPDATE', gameState);
-        } catch (err) {
-          logger.error('ROLL_DICE failed:', err);
-          const message = (err as Error).message;
-          const code: AckError['code'] = message.includes('active player')
-            ? 'NOT_ACTIVE_PLAYER'
-            : message.includes('phase')
-              ? 'INVALID_PHASE'
-              : 'INTERNAL_ERROR';
-          ack(errorAck(code, message));
+          const gameState = await gamePersistenceService.rollDice(session.gameId, session.playerId);
+          completeAction(io, gameState.gameId, gameState, ack);
+        } catch (error) {
+          logger.error('ROLL_DICE failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
         }
       },
     );
 
-    // ─── END_TURN ───────────────────────────────────────────────────────
+    socket.on(
+      CLIENT_EVENTS.BANK_TRADE,
+      async (
+        request: BankTradeRequest,
+        ack: SimpleActionAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
+
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for BANK_TRADE.');
+          return;
+        }
+
+        try {
+          const gameState = await gamePersistenceService.bankTrade(
+            session.gameId,
+            session.playerId,
+            request.giveResource,
+            request.receiveResource,
+          );
+          completeAction(io, gameState.gameId, gameState, ack);
+        } catch (error) {
+          logger.error('BANK_TRADE failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
+
     socket.on(
       CLIENT_EVENTS.END_TURN,
       async (
         request: EndTurnRequest,
-        ack: (response: SocketAck<SimpleActionAckData>) => void,
+        ack: SimpleActionAck,
       ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
+
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for END_TURN.');
+          return;
+        }
+
         try {
-          const mapping = socketPlayerMap.get(socket.id);
-          if (!mapping || mapping.gameId !== request.gameId) {
-            ack(errorAck('SESSION_NOT_FOUND', 'You are not in this game'));
-            return;
-          }
-
-          const gameState = await gamePersistenceService.endTurn(
-            request.gameId,
-            mapping.playerId,
-          );
-
-          ack({ ok: true, data: { gameState } });
-          socket.to(gameState.gameId).emit('GAME_STATE_UPDATE', gameState);
-        } catch (err) {
-          logger.error('END_TURN failed:', err);
-          const message = (err as Error).message;
-          const code: AckError['code'] = message.includes('active player')
-            ? 'NOT_ACTIVE_PLAYER'
-            : 'INTERNAL_ERROR';
-          ack(errorAck(code, message));
+          const gameState = await gamePersistenceService.endTurn(session.gameId, session.playerId);
+          completeAction(io, gameState.gameId, gameState, ack);
+        } catch (error) {
+          logger.error('END_TURN failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
         }
       },
     );
 
-    // ─── DISCONNECT ─────────────────────────────────────────────────────
+    socket.on(
+      CLIENT_EVENTS.SYNC_GAME_STATE,
+      async (
+        request: SyncGameStateRequest,
+        ack: SimpleActionAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
+
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for SYNC_GAME_STATE.');
+          return;
+        }
+
+        try {
+          const gameState = await gamePersistenceService.getGameState(session.gameId);
+          if (!gameState || !gameState.playersById[session.playerId]) {
+            rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Game session not found.');
+            return;
+          }
+
+          rememberSocketSession(socket, gameState, session.playerId);
+          completeSync(socket, ack, gameState);
+        } catch (error) {
+          logger.error('SYNC_GAME_STATE failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
+
+    socket.on(
+      CLIENT_EVENTS.SEND_CHAT_MESSAGE,
+      async (
+        request: SendChatMessageRequest,
+        ack: SimpleActionAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
+
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for SEND_CHAT_MESSAGE.');
+          return;
+        }
+
+        try {
+          const gameState = await gamePersistenceService.appendChatMessage(
+            session.gameId,
+            session.playerId,
+            request.message,
+          );
+          completeAction(io, gameState.gameId, gameState, ack);
+        } catch (error) {
+          logger.error('SEND_CHAT_MESSAGE failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
+
     socket.on(SocketEvents.Disconnect, () => {
       logger.info(`Client disconnected: ${socket.id}`);
       socketPlayerMap.delete(socket.id);

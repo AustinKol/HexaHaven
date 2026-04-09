@@ -1,8 +1,8 @@
 import { ScreenId } from '../../shared/constants/screenIds';
-import { ApiRoutes } from '../../shared/constants/apiRoutes';
-import type { ApiResponse, RoomSnapshot } from '../../shared/types/api';
-import { apiFetch } from '../networking/apiClient';
+import { defaultStartingResourceBundle } from '../../shared/constants/startingResources';
+import { createGame } from '../networking/socketClient';
 import { setLobbySession } from '../state/lobbyState';
+import { createMusicToggleButton } from '../ui/musicToggleButton';
 
 export class HostGameScreen {
   readonly id = ScreenId.HostGame;
@@ -32,6 +32,20 @@ export class HostGameScreen {
     nameInput.placeholder = 'Your name';
     nameInput.maxLength = 24;
 
+    const sizeLabel = document.createElement('p');
+    sizeLabel.className = 'font-hexahaven-ui text-slate-300 mb-2';
+    sizeLabel.textContent = 'Select game size';
+
+    const sizeSelect = document.createElement('select');
+    sizeSelect.className = 'w-full px-4 py-3 rounded-lg bg-slate-800 border border-slate-600 text-white mb-3';
+
+    [2, 3, 4].forEach((size) => {
+      const option = document.createElement('option');
+      option.value = String(size);
+      option.textContent = `${size} Players`;
+      sizeSelect.appendChild(option);
+    });
+
     const errorText = document.createElement('p');
     errorText.className = 'font-hexahaven-ui text-sm text-red-300 min-h-5 mb-3';
 
@@ -58,17 +72,23 @@ export class HostGameScreen {
       errorText.textContent = '';
 
       try {
-        const response = await apiFetch<ApiResponse<{ room: RoomSnapshot; playerId: string }>>(ApiRoutes.HostRoom, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name }),
+        const ack = await createGame({
+          displayName: name,
+          config: {
+            playerCount: Number(sizeSelect.value),
+            goalCount: 0,
+            winRule: 'ALL_GOALS_COMPLETE',
+            mapSeed: 0,
+            mapSize: 'small',
+            timerEnabled: false,
+            turnTimeSec: null,
+            allowReroll: false,
+            startingResources: defaultStartingResourceBundle(),
+          },
         });
-        if (!response.success || !response.data) {
-          throw new Error(response.error ?? 'Unable to create room.');
-        }
         setLobbySession({
-          roomId: response.data.room.roomId,
-          playerId: response.data.playerId,
+          roomId: ack.gameState.roomCode,
+          playerId: ack.playerId,
           playerName: name,
           role: 'host',
         });
@@ -97,10 +117,13 @@ export class HostGameScreen {
     card.appendChild(title);
     card.appendChild(subtitle);
     card.appendChild(nameInput);
+    card.appendChild(sizeLabel);
+    card.appendChild(sizeSelect);
     card.appendChild(errorText);
     card.appendChild(startButton);
     card.appendChild(backButton);
     this.container.appendChild(card);
+    this.container.appendChild(createMusicToggleButton());
     parentElement.appendChild(this.container);
     nameInput.focus();
   }

@@ -8,6 +8,7 @@ export const ScreenId = {
   GameBoard: 'game-board',
   Result: 'result',
   Settings: 'settings',
+  Rules: 'rules',
   TestMapGen: 'test-map-gen',
 } as const;
 

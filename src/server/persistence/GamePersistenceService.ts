@@ -1,8 +1,10 @@
 import type {
+  ChatMessage,
   GameState,
   GameConfig,
   PlayerState,
   ResourceBundle,
+  ResourceType,
   TurnState,
   StructureState,
   DiceRoll,
@@ -28,6 +30,7 @@ const DEFAULT_RESOURCES: ResourceBundle = {
 const DEFAULT_STATS: PlayerStats = {
   publicVP: 0,
   settlementsBuilt: 0,
+  citiesBuilt: 0,
   roadsBuilt: 0,
   totalResourcesCollected: 0,
   totalResourcesSpent: 0,
@@ -36,6 +39,11 @@ const DEFAULT_STATS: PlayerStats = {
 };
 
 const PLAYER_COLORS = ['#E74C3C', '#3498DB', '#2ECC71', '#F39C12'];
+const RESOURCE_TYPES: ResourceType[] = ['CRYSTAL', 'STONE', 'BLOOM', 'EMBER', 'GOLD'];
+
+function isResourceType(value: string): value is ResourceType {
+  return RESOURCE_TYPES.includes(value as ResourceType);
+}
 
 function generateId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -89,6 +97,7 @@ export class GamePersistenceService {
       playerId,
       userId: playerId,
       displayName,
+      avatarUrl: null,
       color: PLAYER_COLORS[0],
       isHost: true,
       resources: { ...startingResources },
@@ -99,6 +108,7 @@ export class GamePersistenceService {
       updatedAt: now,
     };
     await playersRepository.createPlayer(gameId, hostPlayer);
+    await gameSessionsRepository.updatePlayerOrder(gameId, [playerId]);
 
     // 3. Build in-memory GameState
     const gameState: GameState = {
@@ -123,6 +133,7 @@ export class GamePersistenceService {
         turnEndsAt: null,
         lastDiceRoll: null,
       },
+      chatMessages: [],
     };
 
     // 4. Cache only after all writes succeed
@@ -138,10 +149,7 @@ export class GamePersistenceService {
     displayName: string,
   ): Promise<{ gameState: GameState; playerId: string }> {
     // Look up game by room code — try cache first, then Firestore
-    let gameState = gameStateStore.findByRoomCode(joinCode);
-    if (!gameState) {
-      gameState = await this.loadGame(joinCode);
-    }
+    const gameState = await this.getGameState(joinCode);
     if (!gameState) {
       throw new Error(`No game found with join code ${joinCode}`);
     }
@@ -160,6 +168,7 @@ export class GamePersistenceService {
       playerId,
       userId: playerId,
       displayName,
+      avatarUrl: null,
       color: PLAYER_COLORS[playerCount],
       isHost: false,
       resources: { ...(gameState.config.startingResources ?? DEFAULT_RESOURCES) },
@@ -428,6 +437,52 @@ export class GamePersistenceService {
     return gameState;
   }
 
+  async bankTrade(
+    gameId: string,
+    playerId: string,
+    giveResource: string,
+    receiveResource: string,
+  ): Promise<GameState> {
+    const gameState = await this.getGameState(gameId);
+    if (!gameState) throw new Error(`Game ${gameId} not found`);
+    if (gameState.roomStatus !== 'in_progress') throw new Error('Bank trade is only allowed during an active game');
+    if (gameState.turn.currentPlayerId !== playerId) throw new Error('Only the active player can bank trade');
+    if (gameState.turn.phase !== 'ACTION') throw new Error('Bank trade is only allowed during the ACTION phase');
+    if (!isResourceType(giveResource) || !isResourceType(receiveResource)) {
+      throw new Error('Invalid resource type');
+    }
+    if (giveResource === receiveResource) {
+      throw new Error('Give and receive resources must be different');
+    }
+
+    const player = gameState.playersById[playerId];
+    if (!player) throw new Error('Player not found');
+
+    const currentAmount = player.resources[giveResource] ?? 0;
+    if (currentAmount < 4) {
+      throw new Error(`Need 4 ${giveResource} to bank trade`);
+    }
+
+    const updatedResources: ResourceBundle = {
+      ...player.resources,
+      [giveResource]: currentAmount - 4,
+      [receiveResource]: (player.resources[receiveResource] ?? 0) + 1,
+    };
+
+    await playersRepository.updateResources(gameState.gameId, playerId, updatedResources);
+
+    gameState.playersById[playerId] = {
+      ...player,
+      resources: updatedResources,
+      updatedAt: nowISO(),
+    };
+    gameState.updatedAt = nowISO();
+    gameStateStore.set(gameState.gameId, gameState);
+
+    logger.info(`Bank trade by ${playerId} in game ${gameState.gameId}`);
+    return gameState;
+  }
+
   // ───────────────────────────────────────────── END TURN ───────────────────
 
   async endTurn(
@@ -533,6 +588,67 @@ export class GamePersistenceService {
     return gameState;
   }
 
+  async appendChatMessage(
+    gameId: string,
+    playerId: string,
+    rawMessage: string,
+  ): Promise<GameState> {
+    const gameState = await this.getGameState(gameId);
+    if (!gameState) throw new Error(`Game ${gameId} not found`);
+
+    const player = gameState.playersById[playerId];
+    if (!player) throw new Error('Player not found');
+
+    const message = rawMessage.trim();
+    if (!message) throw new Error('Chat message cannot be empty');
+
+    const chatMessage: ChatMessage = {
+      id: generateId('chat'),
+      senderId: playerId,
+      senderName: player.displayName,
+      message,
+      timestamp: nowISO(),
+    };
+
+    await gameSessionsRepository.appendChatMessage(gameState.gameId, chatMessage);
+
+    gameState.chatMessages = [...(gameState.chatMessages ?? []), chatMessage];
+    gameState.updatedAt = nowISO();
+    gameStateStore.set(gameState.gameId, gameState);
+
+    logger.info(`Chat message by ${playerId} in game ${gameState.gameId}`);
+    return gameState;
+  }
+
+  async getGameState(identifier: string): Promise<GameState | null> {
+    const normalizedIdentifier = identifier.trim();
+    if (!normalizedIdentifier) {
+      return null;
+    }
+
+    const candidates = Array.from(new Set([normalizedIdentifier, normalizedIdentifier.toUpperCase()]));
+    for (const candidate of candidates) {
+      const cachedById = gameStateStore.get(candidate);
+      if (cachedById) {
+        return cachedById;
+      }
+
+      const cachedByRoomCode = gameStateStore.findByRoomCode(candidate);
+      if (cachedByRoomCode) {
+        return cachedByRoomCode;
+      }
+    }
+
+    for (const candidate of candidates) {
+      const loadedGame = await this.loadGame(candidate);
+      if (loadedGame) {
+        return loadedGame;
+      }
+    }
+
+    return null;
+  }
+
   // ──────────────────────────────────────── LOAD GAME ───────────────────────
 
   /**
@@ -603,6 +719,7 @@ export class GamePersistenceService {
         turnEndsAt: toISO(gameDoc.turnEndsAt),
         lastDiceRoll,
       },
+      chatMessages: gameDoc.chatMessages ?? [],
     };
 
     // Cache the loaded state

@@ -22,6 +22,7 @@ export interface AckError {
     | 'NOT_ACTIVE_PLAYER'
     | 'INVALID_PHASE'
     | 'MANDATORY_ACTION_INCOMPLETE'
+    | 'INSUFFICIENT_RESOURCES'
     | 'INTERNAL_ERROR';
   message: string;
   details?: Record<string, unknown>;
@@ -54,6 +55,22 @@ export interface RollDiceRequest {
 
 export interface EndTurnRequest {
   gameId: string;
+}
+
+export interface BankTradeRequest {
+  gameId: string;
+  giveResource: 'EMBER' | 'GOLD' | 'STONE' | 'BLOOM' | 'CRYSTAL';
+  receiveResource: 'EMBER' | 'GOLD' | 'STONE' | 'BLOOM' | 'CRYSTAL';
+}
+
+export interface SyncGameStateRequest {
+  gameId: string;
+  gameState: GameState;
+}
+
+export interface SendChatMessageRequest {
+  gameId: string;
+  message: string;
 }
 
 // ─── Server -> Client ack data ───────────────────────────────────────
@@ -106,8 +123,20 @@ export interface ClientToServerEvents {
     request: RollDiceRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,
   ) => void;
+  BANK_TRADE: (
+    request: BankTradeRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
   END_TURN: (
     request: EndTurnRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  SYNC_GAME_STATE: (
+    request: SyncGameStateRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  SEND_CHAT_MESSAGE: (
+    request: SendChatMessageRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,
   ) => void;
 }

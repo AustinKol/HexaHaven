@@ -1,5 +1,5 @@
 import { FieldValue } from 'firebase-admin/firestore';
-import type { RoomStatus, TurnState, GameConfig, ResourceBundle } from '../../shared/types/domain';
+import type { ChatMessage, RoomStatus, TurnState, GameConfig, ResourceBundle } from '../../shared/types/domain';
 import { FirestoreRepository } from './FirestoreRepository';
 
 // ─── Firestore document shape for /games/{gameId} ────────────────────────────
@@ -10,6 +10,7 @@ export interface GameSessionDoc {
   status: RoomStatus;
   config: GameConfig;
   playerOrder: string[];
+  chatMessages: ChatMessage[];
   /** playerId → PlayerStats map stored at the top level for quick score reads. */
   playerStats: Record<string, { publicVP: number; settlementsBuilt: number; roadsBuilt: number; totalResourcesCollected: number; totalResourcesSpent: number; longestRoadLength: number; turnsPlayed: number }>;
   winnerPlayerId: string | null;
@@ -60,6 +61,7 @@ export class GameSessionsRepository extends FirestoreRepository {
       status: 'waiting',
       config: params.config,
       playerOrder: [],
+      chatMessages: [],
       playerStats: {},
       winnerPlayerId: null,
       createdBy: params.createdBy,
@@ -134,6 +136,13 @@ export class GameSessionsRepository extends FirestoreRepository {
   async updatePlayerOrder(gameId: string, playerOrder: string[]): Promise<void> {
     await this.doc(gameId).update({
       playerOrder,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+  }
+
+  async appendChatMessage(gameId: string, chatMessage: ChatMessage): Promise<void> {
+    await this.doc(gameId).update({
+      chatMessages: FieldValue.arrayUnion(chatMessage),
       updatedAt: FieldValue.serverTimestamp(),
     });
   }

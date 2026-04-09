@@ -1,20 +1,19 @@
 import { ScreenId } from '../../shared/constants/screenIds';
+import { createMusicToggleButton } from '../ui/musicToggleButton';
 
 export class MainMenuScreen {
   readonly id = ScreenId.MainMenu;
   private container: HTMLElement | null = null;
   private navigate: ((screenId: ScreenId) => void) | null = null;
 
-  render(parentElement: HTMLElement, onComplete?: () => void, navigate?: (screenId: ScreenId) => void): void {
+  render(parentElement: HTMLElement, _onComplete?: () => void, navigate?: (screenId: ScreenId) => void): void {
     this.navigate = navigate || null;
-    // Clear existing content
     parentElement.innerHTML = '';
 
-    // Create main container
     this.container = document.createElement('div');
     this.container.className = 'relative flex flex-col items-center justify-center w-full h-full overflow-hidden bg-gradient-to-b from-slate-900 to-slate-950';
 
-    // Background video (served from public/videos/welcome-bg.mp4)
+    // Background video
     const backgroundVideo = document.createElement('video');
     backgroundVideo.className = 'absolute inset-0 w-full h-full object-cover';
     backgroundVideo.autoplay = true;
@@ -34,47 +33,43 @@ export class MainMenuScreen {
     const content = document.createElement('div');
     content.className = 'relative z-10 flex flex-col items-center justify-center w-full h-full';
 
-    // Title
     const title = document.createElement('h1');
     title.className = 'font-hexahaven-title text-6xl font-bold text-white mb-4 drop-shadow-lg';
     title.textContent = 'HexaHaven';
 
-    // Subtitle
     const subtitle = document.createElement('p');
     subtitle.className = 'font-hexahaven-ui text-xl text-slate-300 mb-12 drop-shadow-md';
-    subtitle.textContent = 'Master the Hexagon Strategy Game';
+    subtitle.textContent = 'Shape your haven, one turn at a time!';
 
-    // Button container
     const buttonContainer = document.createElement('div');
     buttonContainer.className = 'flex flex-col gap-4 min-w-64';
 
-    // Host Game button
-    const hostBtn = this.createButton('Host Game', () => this.onHostGame());
+    // Primary buttons
+    const hostBtn = this.createButton('Host Game', () => this.navigate?.(ScreenId.HostGame as any));
+    const joinBtn = this.createButton('Join Game', () => this.navigate?.(ScreenId.JoinGame as any));
+    const watchBtn = this.createButton('Watch Game', () => this.navigate?.(ScreenId.WatchGame as any));
     buttonContainer.appendChild(hostBtn);
-
-    // Join Game button
-    const joinBtn = this.createButton('Join Game', () => this.onJoinGame());
     buttonContainer.appendChild(joinBtn);
-
-    // Watch Game button
-    const watchBtn = this.createButton('Watch Game', () => this.onWatchGame());
     buttonContainer.appendChild(watchBtn);
 
-    // Settings button
-    const settingsBtn = this.createButton('Settings', () => this.onSettings(), 'secondary');
+    // Secondary buttons
+    const rulesBtn = this.createButton('How to Play', () => this.navigate?.(ScreenId.Rules as any), 'secondary');
+    const settingsBtn = this.createButton('Settings', () => this.navigate?.(ScreenId.Settings as any), 'secondary');
+    const testMapBtn = this.createButton('Test Map Gen', () => this.navigate?.(ScreenId.TestMapGen as any), 'secondary');
+    buttonContainer.appendChild(rulesBtn);
     buttonContainer.appendChild(settingsBtn);
-
-    // Test Map Gen button
-    const testMapBtn = this.createButton('Test Map Gen', () => this.onTestMapGen(), 'secondary');
     buttonContainer.appendChild(testMapBtn);
 
     content.appendChild(title);
     content.appendChild(subtitle);
     content.appendChild(buttonContainer);
 
+    const musicToggleBtn = createMusicToggleButton();
+
     this.container.appendChild(backgroundVideo);
     this.container.appendChild(overlay);
     this.container.appendChild(content);
+    this.container.appendChild(musicToggleBtn);
 
     parentElement.appendChild(this.container);
   }
@@ -89,38 +84,7 @@ export class MainMenuScreen {
     button.className = `${baseClasses} ${variantClasses}`;
     button.textContent = text;
     button.addEventListener('click', onClick);
-
     return button;
-  }
-
-  private onHostGame(): void {
-    if (this.navigate) {
-      this.navigate(ScreenId.HostGame as any);
-    }
-  }
-
-  private onJoinGame(): void {
-    if (this.navigate) {
-      this.navigate(ScreenId.JoinGame as any);
-    }
-  }
-
-  private onWatchGame(): void {
-    if (this.navigate) {
-      this.navigate(ScreenId.WatchGame as any);
-    }
-  }
-
-  private onSettings(): void {
-    if (this.navigate) {
-      this.navigate(ScreenId.Settings as any);
-    }
-  }
-
-  private onTestMapGen(): void {
-    if (this.navigate) {
-      this.navigate(ScreenId.TestMapGen as any);
-    }
   }
 
   destroy(): void {
