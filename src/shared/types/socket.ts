@@ -118,6 +118,11 @@ export interface CancelTradeRequest {
   offerId: string;
 }
 
+export interface SendChatMessageRequest {
+  gameId: string;
+  message: string;
+}
+
 // ─── Server -> Client ack data ───────────────────────────────────────
 
 export interface CreateGameAckData {
@@ -215,6 +220,10 @@ export interface ClientToServerEvents {
   // Recovery action to fetch authoritative state after refresh/reconnect.
   SYNC_GAME_STATE: (
     request: SyncGameStateRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  SEND_CHAT_MESSAGE: (
+    request: SendChatMessageRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,
   ) => void;
 }

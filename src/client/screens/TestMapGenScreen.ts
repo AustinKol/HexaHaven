@@ -1764,7 +1764,8 @@ export class TestMapGenScreen {
                 roadHoverColor: this.roadHoverColor,
             })],
             scale: {
-                mode: Phaser.Scale.FIT,
+                // Match game size to viewport directly to avoid post-scale distortion.
+                mode: Phaser.Scale.RESIZE,
                 autoCenter: Phaser.Scale.CENTER_BOTH,
             },
         };
