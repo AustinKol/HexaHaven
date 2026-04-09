@@ -274,8 +274,9 @@ export class GameBoardScreen {
       onMapPointerDown: (hit) => this.handleMapPlaceClick(hit),
       pendingBuildKind: pendingKind,
       roadHoverColor,
+      // Board renderer expects canonical structure names from shared contracts.
       structures: structures.map(s => ({
-        type: s.type === 'GARDEN' ? 'CITY' : (s.type as 'SETTLEMENT' | 'ROAD'),
+        type: s.type as 'CITY' | 'SETTLEMENT' | 'ROAD',
         ownerColor: s.ownerColor,
         vertex: s.vertex,
         edge: s.edge,
@@ -1207,6 +1208,7 @@ export class GameBoardScreen {
       p.stats.publicVP = (p.stats.publicVP ?? 0) + 1;
       placed = true;
     } else if (kind === 'CITY' && selectedVertex) {
+      // City is an in-place upgrade of an owned settlement on same vertex.
       const existingKey = Object.keys(next.board.structuresById).find(
         (key) => {
           const s = next.board.structuresById[key];
@@ -1217,7 +1219,7 @@ export class GameBoardScreen {
         return;
       }
       const existing = next.board.structuresById[existingKey];
-      existing.type = 'GARDEN';
+      existing.type = 'CITY';
       p.stats.citiesBuilt = (p.stats.citiesBuilt ?? 0) + 1;
       p.stats.publicVP = (p.stats.publicVP ?? 0) + 1; // +1 VP existing settlement = 2 VP total
       placed = true;
@@ -1261,7 +1263,8 @@ export class GameBoardScreen {
     // Force synchronize with server to bypass the frozen Demo 1 scope
     const roomId = getLobbySession()?.roomId ?? null;
     if (roomId) {
-      void syncGameState(roomId, next);
+      // Re-sync from server-authoritative state after local optimistic update.
+      void syncGameState(roomId);
     }
 
     this.refreshPlayerUi();
@@ -1285,8 +1288,9 @@ export class GameBoardScreen {
     if (scene) {
       scene.updateMap(
         pendingBuildKind,
+        // Keep renderer structure payload aligned with shared `StructureType`.
         structures.map(s => ({
-          type: s.type === 'GARDEN' ? 'CITY' : (s.type as 'SETTLEMENT' | 'ROAD'),
+          type: s.type as 'CITY' | 'SETTLEMENT' | 'ROAD',
           ownerColor: s.ownerColor,
           vertex: s.vertex,
           edge: s.edge,

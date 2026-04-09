@@ -9,6 +9,8 @@ import type {
   ClientRole,
   GameConfig,
   GameState,
+  ResourceType,
+  ResourceBundle,
 } from './domain';
 
 // ─── Ack types ───────────────────────────────────────────────────────
@@ -59,13 +61,61 @@ export interface EndTurnRequest {
 
 export interface BankTradeRequest {
   gameId: string;
-  giveResource: 'EMBER' | 'GOLD' | 'STONE' | 'BLOOM' | 'CRYSTAL';
-  receiveResource: 'EMBER' | 'GOLD' | 'STONE' | 'BLOOM' | 'CRYSTAL';
+  giveResource: ResourceType;
+  receiveResource: ResourceType;
 }
 
 export interface SyncGameStateRequest {
+  // Pull-only sync request; server returns authoritative latest snapshot.
   gameId: string;
-  gameState: GameState;
+}
+
+export interface PlaceSetupSettlementRequest {
+  gameId: string;
+  vertexId: string;
+}
+
+export interface PlaceSetupRoadRequest {
+  gameId: string;
+  edgeId: string;
+}
+
+export interface BuildRoadRequest {
+  gameId: string;
+  edgeId: string;
+}
+
+export interface BuildSettlementRequest {
+  gameId: string;
+  vertexId: string;
+}
+
+export interface UpgradeSettlementRequest {
+  gameId: string;
+  vertexId: string;
+}
+
+export interface OfferTradeRequest {
+  gameId: string;
+  targetPlayerId: string;
+  // Bundle form keeps payload stable if trade UI supports composite offers.
+  give: ResourceBundle;
+  receive: ResourceBundle;
+}
+
+export interface AcceptTradeRequest {
+  gameId: string;
+  offerId: string;
+}
+
+export interface RejectTradeRequest {
+  gameId: string;
+  offerId: string;
+}
+
+export interface CancelTradeRequest {
+  gameId: string;
+  offerId: string;
 }
 
 // ─── Server -> Client ack data ───────────────────────────────────────
@@ -122,10 +172,47 @@ export interface ClientToServerEvents {
     request: BankTradeRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,
   ) => void;
+  OFFER_TRADE: (
+    request: OfferTradeRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  ACCEPT_TRADE: (
+    request: AcceptTradeRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  REJECT_TRADE: (
+    request: RejectTradeRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  CANCEL_TRADE: (
+    request: CancelTradeRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  PLACE_SETUP_SETTLEMENT: (
+    request: PlaceSetupSettlementRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  PLACE_SETUP_ROAD: (
+    request: PlaceSetupRoadRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  BUILD_ROAD: (
+    request: BuildRoadRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  BUILD_SETTLEMENT: (
+    request: BuildSettlementRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  UPGRADE_SETTLEMENT: (
+    request: UpgradeSettlementRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
   END_TURN: (
     request: EndTurnRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,
   ) => void;
+  // Recovery action to fetch authoritative state after refresh/reconnect.
   SYNC_GAME_STATE: (
     request: SyncGameStateRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,

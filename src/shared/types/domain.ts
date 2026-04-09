@@ -11,7 +11,7 @@ export type ClientRole = 'PLAYER' | 'SPECTATOR';
 
 export type ResourceType = 'CRYSTAL' | 'STONE' | 'BLOOM' | 'EMBER' | 'GOLD';
 
-export type StructureType = 'ROAD' | 'SETTLEMENT' | 'GARDEN';
+export type StructureType = 'ROAD' | 'SETTLEMENT' | 'CITY';
 
 export type LocationType = 'EDGE' | 'VERTEX';
 
@@ -147,6 +147,33 @@ export interface BoardState {
   structuresById: Record<string, StructureState>;
 }
 
+// Setup flow state is kept in GameState so reconnect/reload can resume
+// deterministic setup progression without client-local assumptions.
+export type SetupPlacementType = 'SETTLEMENT' | 'ROAD';
+
+export interface SetupState {
+  inProgress: boolean;
+  round: 1 | 2;
+  currentPlayerIndex: number;
+  expectedPlacement: SetupPlacementType;
+  lastPlacedSettlementVertexId: string | null;
+}
+
+export interface PlayerTradeOffer {
+  offerId: string;
+  fromPlayerId: string;
+  targetPlayerId: string;
+  // Full bundles allow multi-resource offers while preserving one-offer model.
+  give: ResourceBundle;
+  receive: ResourceBundle;
+  createdAt: string;
+}
+
+export interface TradeState {
+  // Demo 2 rule: at most one active player-to-player offer at a time.
+  activeOffer: PlayerTradeOffer | null;
+}
+
 export interface TurnState {
   currentTurn: number;
   currentPlayerId: string | null;
@@ -170,5 +197,8 @@ export interface GameState {
   playerOrder: string[];
   playersById: Record<string, PlayerState>;
   board: BoardState;
+  // Demo 2 additions for setup sequencing and synchronized trade state.
+  setup: SetupState;
+  trade: TradeState;
   turn: TurnState;
 }

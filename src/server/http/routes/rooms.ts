@@ -115,6 +115,18 @@ function buildInitialGameStateFromRoom(room: Room): GameState {
       tilesById: {},
       structuresById: {},
     },
+    // Setup/trade are explicit Demo 2 state channels and must exist on all
+    // snapshots even before gameplay engine logic is fully wired.
+    setup: {
+      inProgress: false,
+      round: 1,
+      currentPlayerIndex: 0,
+      expectedPlacement: 'SETTLEMENT',
+      lastPlacedSettlementVertexId: null,
+    },
+    trade: {
+      activeOffer: null,
+    },
     turn: {
       currentTurn: 0,
       currentPlayerId: null,
@@ -231,6 +243,7 @@ roomsRouter.post(ApiRoutes.StartRoom, (req, res) => {
   }
 
   const existingGameState = roomManager.getGameState(normalizedRoomId);
+  // Reuse existing snapshot when present to preserve any precomputed state.
   const gameState = existingGameState
     ?? roomManager.initializeGameState(normalizedRoomId, buildInitialGameStateFromRoom(room));
 
@@ -249,6 +262,7 @@ roomsRouter.post(ApiRoutes.StartRoom, (req, res) => {
 
   const updatedGameState: GameState = {
     ...engineResult.gameState,
+    // Keep REST path snapshots timestamp-consistent with realtime flow.
     updatedAt: new Date().toISOString(),
   };
 

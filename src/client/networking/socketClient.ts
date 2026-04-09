@@ -52,6 +52,7 @@ function emitWithAck<T>(
   emitter: (ack: (response: SocketAck<T>) => void) => void,
   timeoutMs: number = 8000,
 ): Promise<T> {
+  // Keep one shared ack contract path so every client action gets consistent timeout behavior and ACTION_REJECTED surfacing.
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
       reject(new Error('Timed out waiting for server response.'));
@@ -118,10 +119,11 @@ export async function endTurn(gameId: string): Promise<SimpleActionAckData> {
   });
 }
 
-export async function syncGameState(gameId: string, gameState: any): Promise<SimpleActionAckData> {
+export async function syncGameState(gameId: string): Promise<SimpleActionAckData> {
   const s = connectSocket({ gameId });
   return emitWithAck<SimpleActionAckData>((ack) => {
-    s.emit('SYNC_GAME_STATE', { gameId, gameState }, ack);
+    // SYNC is server-authoritative pull (no client snapshot push).
+    s.emit('SYNC_GAME_STATE', { gameId }, ack);
   });
 }
 

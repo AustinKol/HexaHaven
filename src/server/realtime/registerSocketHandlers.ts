@@ -15,6 +15,9 @@ import type {
 } from '../../shared/types/socket';
 import { resolvePlayerColor } from '../../shared/constants/playerColors';
 import { GameEngine } from '../engine/GameEngine';
+import { boardRepository } from '../persistence/boardRepository';
+import { gameSessionsRepository } from '../persistence/gameSessionsRepository';
+import { playersRepository } from '../persistence/playersRepository';
 import type { Room } from '../sessions/Room';
 import { roomManager } from '../sessions/roomManagerSingleton';
 import { logger } from '../utils/logger';
@@ -141,6 +144,16 @@ function buildInitialGameStateFromRoom(room: Room, request: CreateGameRequest): 
       tilesById: {},
       structuresById: {},
     },
+    setup: {
+      inProgress: false,
+      round: 1,
+      currentPlayerIndex: 0,
+      expectedPlacement: 'SETTLEMENT',
+      lastPlacedSettlementVertexId: null,
+    },
+    trade: {
+      activeOffer: null,
+    },
     turn: {
       currentTurn: 0,
       currentPlayerId: null,
@@ -154,6 +167,7 @@ function buildInitialGameStateFromRoom(room: Room, request: CreateGameRequest): 
 }
 
 function resolvePlayerId(socket: TypedSocket, gameState: GameState): string | null {
+  // Accept player identity from runtime socket data first, then auth/query fallback for reconnect compatibility.
   const socketPlayerId = normalizeId((socket.data as Record<string, unknown>).playerId);
   if (socketPlayerId !== null && gameState.playersById[socketPlayerId]) {
     return socketPlayerId;
@@ -206,6 +220,7 @@ function completeAction(
   gameState: GameState,
   ack: SimpleActionAck,
 ): void {
+  // Single authoritative broadcast channel for all successful state changes.
   io.to(gameId).emit(SERVER_EVENTS.GAME_STATE_UPDATE, gameState);
   ack({ ok: true, data: { gameState } });
 }
@@ -220,6 +235,106 @@ function completeCreateOrJoin<T extends CreateGameAckData | JoinGameAckData>(
   ack({ ok: true, data: payload });
 }
 
+function toIsoString(value: unknown, fallback: string = new Date().toISOString()): string {
+  if (typeof value === 'string' && value.trim()) {
+    return value;
+  }
+  if (value && typeof value === 'object' && 'toDate' in value) {
+    const maybeDate = (value as { toDate: () => Date }).toDate();
+    if (maybeDate instanceof Date && !Number.isNaN(maybeDate.getTime())) {
+      return maybeDate.toISOString();
+    }
+  }
+  return fallback;
+}
+
+async function loadLatestGameStateSnapshot(roomCodeOrGameId: string): Promise<GameState | null> {
+  const inMemory = roomManager.getGameState(roomCodeOrGameId);
+  if (inMemory) {
+    // Fast path: avoid persistence reads when state is already hot in memory.
+    return inMemory;
+  }
+
+  try {
+    const sessionDoc = await gameSessionsRepository.getGame(roomCodeOrGameId)
+      ?? await gameSessionsRepository.getGameByRoomCode(roomCodeOrGameId);
+    if (!sessionDoc) {
+      return null;
+    }
+
+    const gameId = sessionDoc.gameId;
+    const roomCode = sessionDoc.roomCode;
+    const players = await playersRepository.getPlayers(gameId);
+    const tilesById = await boardRepository.getTiles(gameId);
+    const structuresById = await boardRepository.getStructures(gameId);
+    const nowIso = new Date().toISOString();
+
+    const gameState: GameState = {
+      gameId,
+      roomCode,
+      roomStatus: sessionDoc.status,
+      createdBy: sessionDoc.createdBy,
+      createdAt: toIsoString(sessionDoc.createdAt, nowIso),
+      updatedAt: toIsoString(sessionDoc.updatedAt, nowIso),
+      isDeleted: sessionDoc.isDeleted,
+      winnerPlayerId: sessionDoc.winnerPlayerId,
+      config: sessionDoc.config,
+      playerOrder: sessionDoc.playerOrder,
+      playersById: Object.fromEntries(
+        players.map((player) => [
+          player.playerId,
+          {
+            ...player,
+            joinedAt: toIsoString(player.joinedAt, nowIso),
+            updatedAt: toIsoString(player.updatedAt, nowIso),
+            presence: {
+              ...player.presence,
+              lastSeenAt: toIsoString(player.presence.lastSeenAt, nowIso),
+            },
+          },
+        ]),
+      ),
+      board: {
+        tilesById,
+        structuresById,
+      },
+      setup: {
+        // Setup/trade defaults are included in recovered snapshots so payload shape always matches the shared contract.
+        inProgress: false,
+        round: 1,
+        currentPlayerIndex: sessionDoc.currentPlayerIndex ?? 0,
+        expectedPlacement: 'SETTLEMENT',
+        lastPlacedSettlementVertexId: null,
+      },
+      trade: {
+        activeOffer: null,
+      },
+      turn: {
+        currentTurn: sessionDoc.currentTurn,
+        currentPlayerId: sessionDoc.currentPlayerId,
+        currentPlayerIndex: sessionDoc.currentPlayerIndex,
+        phase: sessionDoc.phase,
+        turnStartedAt: sessionDoc.turnStartedAt ? toIsoString(sessionDoc.turnStartedAt, nowIso) : null,
+        turnEndsAt: sessionDoc.turnEndsAt ? toIsoString(sessionDoc.turnEndsAt, nowIso) : null,
+        lastDiceRoll: sessionDoc.lastDiceRoll
+          ? {
+              d1Val: sessionDoc.lastDiceRoll.d1Val,
+              d2Val: sessionDoc.lastDiceRoll.d2Val,
+              sum: sessionDoc.lastDiceRoll.sum,
+              rolledAt: toIsoString(sessionDoc.lastDiceRoll.rolledAt, nowIso),
+            }
+          : null,
+      },
+    };
+
+    roomManager.setHydratedGameState(gameState);
+    return gameState;
+  } catch (error) {
+    logger.warn('Failed to load game state snapshot from Firestore fallback.', error);
+    return null;
+  }
+}
+
 export function registerSocketHandlers(
   io: Server<ClientToServerEvents, ServerToClientEvents>,
 ): void {
@@ -230,6 +345,7 @@ export function registerSocketHandlers(
     const handshakeGameId = normalizeId((socket.handshake.auth as Record<string, unknown>).gameId)
       ?? normalizeId((socket.handshake.query as Record<string, unknown>).gameId);
     if (handshakeGameId !== null) {
+      // Join room early when provided so server push events can flow immediately.
       socket.join(handshakeGameId);
     }
 
@@ -285,7 +401,7 @@ export function registerSocketHandlers(
       completeCreateOrJoin(io, gameId, payload, ack);
     });
 
-    socket.on(CLIENT_EVENTS.JOIN_GAME, (request, ack) => {
+    socket.on(CLIENT_EVENTS.JOIN_GAME, async (request, ack) => {
       const joinCode = typeof request.joinCode === 'string' ? request.joinCode.trim().toUpperCase() : '';
       const displayName = typeof request.displayName === 'string' ? request.displayName.trim() : '';
 
@@ -298,7 +414,12 @@ export function registerSocketHandlers(
         return;
       }
 
-      const room = roomManager.getRoom(joinCode);
+      let room = roomManager.getRoom(joinCode);
+      if (!room) {
+        // Reload from persistence when process memory does not have this room.
+        await loadLatestGameStateSnapshot(joinCode);
+        room = roomManager.getRoom(joinCode);
+      }
       if (!room) {
         rejectCreateOrJoin(socket, ack, { code: 'SESSION_NOT_FOUND', message: 'Session not found for JOIN_GAME.' });
         return;
@@ -328,6 +449,7 @@ export function registerSocketHandlers(
           ? {
             ...existingGameState,
             updatedAt: new Date().toISOString(),
+            // Recompute order/indexed players from room source of truth after join.
             playerOrder: joined.room.players.map((player) => player.id),
             playersById: Object.fromEntries(
               joined.room.players.map((player, index) => [
@@ -510,8 +632,53 @@ export function registerSocketHandlers(
       completeAction(io, gameId, updatedGameState, ack);
     });
 
-        socket.on(CLIENT_EVENTS.BANK_TRADE, (request, ack) => {
-      const normalizedGameId = normalizeId((request as any).gameId);
+    const rejectUntilEngineReady = (ack: SimpleActionAck, actionName: string): void => {
+      // Contract branch is intentionally present so client/server stay in sync
+      // on event surface while gameplay managers are integrated incrementally.
+      rejectAction(socket, ack, {
+        code: 'INVALID_PHASE',
+        message: `${actionName} is wired in realtime contracts but not yet implemented by the gameplay engine.`,
+      });
+    };
+
+    socket.on(CLIENT_EVENTS.PLACE_SETUP_SETTLEMENT, (_request, ack) => {
+      rejectUntilEngineReady(ack, CLIENT_EVENTS.PLACE_SETUP_SETTLEMENT);
+    });
+
+    socket.on(CLIENT_EVENTS.PLACE_SETUP_ROAD, (_request, ack) => {
+      rejectUntilEngineReady(ack, CLIENT_EVENTS.PLACE_SETUP_ROAD);
+    });
+
+    socket.on(CLIENT_EVENTS.BUILD_ROAD, (_request, ack) => {
+      rejectUntilEngineReady(ack, CLIENT_EVENTS.BUILD_ROAD);
+    });
+
+    socket.on(CLIENT_EVENTS.BUILD_SETTLEMENT, (_request, ack) => {
+      rejectUntilEngineReady(ack, CLIENT_EVENTS.BUILD_SETTLEMENT);
+    });
+
+    socket.on(CLIENT_EVENTS.UPGRADE_SETTLEMENT, (_request, ack) => {
+      rejectUntilEngineReady(ack, CLIENT_EVENTS.UPGRADE_SETTLEMENT);
+    });
+
+    socket.on(CLIENT_EVENTS.OFFER_TRADE, (_request, ack) => {
+      rejectUntilEngineReady(ack, CLIENT_EVENTS.OFFER_TRADE);
+    });
+
+    socket.on(CLIENT_EVENTS.ACCEPT_TRADE, (_request, ack) => {
+      rejectUntilEngineReady(ack, CLIENT_EVENTS.ACCEPT_TRADE);
+    });
+
+    socket.on(CLIENT_EVENTS.REJECT_TRADE, (_request, ack) => {
+      rejectUntilEngineReady(ack, CLIENT_EVENTS.REJECT_TRADE);
+    });
+
+    socket.on(CLIENT_EVENTS.CANCEL_TRADE, (_request, ack) => {
+      rejectUntilEngineReady(ack, CLIENT_EVENTS.CANCEL_TRADE);
+    });
+
+    socket.on(CLIENT_EVENTS.BANK_TRADE, (request, ack) => {
+      const normalizedGameId = normalizeId(request.gameId);
       if (normalizedGameId === null) {
         rejectAction(socket, ack, {
           code: 'INVALID_CONFIGURATION',
@@ -542,8 +709,8 @@ export function registerSocketHandlers(
       const result = tradeManager.bankTrade(
         gameState,
         playerId,
-        (request as any).giveResource,
-        (request as any).receiveResource,
+        request.giveResource,
+        request.receiveResource,
       );
 
       if (!result.ok) {
@@ -618,8 +785,8 @@ export function registerSocketHandlers(
       completeAction(io, gameId, updatedGameState, ack);
     });
 
-    socket.on(CLIENT_EVENTS.SYNC_GAME_STATE, (request, ack) => {
-      const normalizedGameId = normalizeId((request as any).gameId);
+    socket.on(CLIENT_EVENTS.SYNC_GAME_STATE, async (request, ack) => {
+      const normalizedGameId = normalizeId(request.gameId);
       if (normalizedGameId === null) {
         rejectAction(socket, ack, {
           code: 'INVALID_CONFIGURATION',
@@ -629,7 +796,7 @@ export function registerSocketHandlers(
       }
       const gameId = normalizedGameId.toUpperCase();
 
-      const gameState = roomManager.getGameState(gameId);
+      const gameState = await loadLatestGameStateSnapshot(gameId);
       if (!gameState) {
         rejectAction(socket, ack, {
           code: 'SESSION_NOT_FOUND',
@@ -647,21 +814,9 @@ export function registerSocketHandlers(
         return;
       }
 
-      const incomingState = (request as any).gameState;
-      const updatedGameState: GameState = {
-        ...incomingState,
-        updatedAt: new Date().toISOString(),
-      };
-
-      if (!roomManager.setGameState(gameId, updatedGameState)) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Unable to store game state for SYNC_GAME_STATE.',
-        });
-        return;
-      }
-
-      completeAction(io, gameId, updatedGameState, ack);
+      socket.join(gameId);
+      // Returns/broadcasts the latest authoritative snapshot for refresh recovery.
+      completeAction(io, gameId, gameState, ack);
     });
 
     socket.on(SocketEvents.Disconnect, () => {
