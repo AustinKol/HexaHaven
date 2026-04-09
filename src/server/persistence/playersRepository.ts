@@ -11,6 +11,37 @@ export interface ActiveGameEntry {
   lastAccessedAt: FirebaseFirestore.Timestamp;
 }
 
+function toIso(value: unknown): string {
+  if (value && typeof value === 'object' && 'toDate' in value && typeof value.toDate === 'function') {
+    return value.toDate().toISOString();
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value;
+  }
+  return new Date().toISOString();
+}
+
+function mapPlayerDoc(data: FirebaseFirestore.DocumentData): PlayerState {
+  return {
+    ...data,
+    joinedAt: toIso(data.joinedAt),
+    updatedAt: toIso(data.updatedAt),
+    presence: data.presence
+      ? {
+          ...data.presence,
+          lastSeenAt: toIso(data.presence.lastSeenAt),
+        }
+      : {
+          isConnected: false,
+          lastSeenAt: new Date().toISOString(),
+          connectionId: '',
+        },
+  } as PlayerState;
+}
+
 // ─── Repository ───────────────────────────────────────────────────────────────
 
 export class PlayersRepository extends FirestoreRepository {
@@ -45,13 +76,13 @@ export class PlayersRepository extends FirestoreRepository {
   async getPlayer(gameId: string, playerId: string): Promise<PlayerState | null> {
     const snap = await this.playersCol(gameId).doc(playerId).get();
     if (!snap.exists) return null;
-    return snap.data() as PlayerState;
+    return mapPlayerDoc(snap.data() ?? {});
   }
 
   /** Fetches all players in a game session. */
   async getPlayers(gameId: string): Promise<PlayerState[]> {
     const snap = await this.playersCol(gameId).get();
-    return snap.docs.map((d) => d.data() as PlayerState);
+    return snap.docs.map((d) => mapPlayerDoc(d.data()));
   }
 
   /** Updates a player's resource bundle (e.g., after dice roll or trade). */

@@ -19,7 +19,7 @@ export interface ChatMessage {
 
 export type ResourceType = 'CRYSTAL' | 'STONE' | 'BLOOM' | 'EMBER' | 'GOLD';
 
-export type StructureType = 'ROAD' | 'SETTLEMENT' | 'GARDEN';
+export type StructureType = 'ROAD' | 'SETTLEMENT' | 'CITY';
 
 export type LocationType = 'EDGE' | 'VERTEX';
 

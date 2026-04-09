@@ -65,7 +65,6 @@ export class JoinGameScreen {
         const ack = await joinGame({
           joinCode: roomId,
           displayName: name,
-          role: 'PLAYER',
         });
         setLobbySession({
           roomId: ack.gameState.roomCode,

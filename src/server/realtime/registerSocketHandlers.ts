@@ -4,10 +4,12 @@ import type { GameState } from '../../shared/types/domain';
 import type {
   AckError,
   BankTradeRequest,
+  BuildStructureRequest,
   ClientToServerEvents,
   CreateGameAckData,
   CreateGameRequest,
   EndTurnRequest,
+  HydrateSessionRequest,
   JoinGameAckData,
   JoinGameRequest,
   RollDiceRequest,
@@ -16,7 +18,6 @@ import type {
   SimpleActionAckData,
   SocketAck,
   StartGameRequest,
-  SyncGameStateRequest,
 } from '../../shared/types/socket';
 import { gamePersistenceService } from '../persistence/GamePersistenceService';
 import { logger } from '../utils/logger';
@@ -81,6 +82,12 @@ function resolveErrorCode(message: string): AckError['code'] {
     || normalized.includes('game id is required')
     || normalized.includes('invalid player count')
     || normalized.includes('invalid resource type')
+    || normalized.includes('invalid road location')
+    || normalized.includes('invalid settlement location')
+    || normalized.includes('invalid city location')
+    || normalized.includes('occupied')
+    || normalized.includes('upgrade your own settlement')
+    || normalized.includes('connect to one of your existing roads or structures')
     || normalized.includes('must be different')
     || normalized.includes('cannot be empty')
     || normalized.includes('need at least 2 players')
@@ -197,6 +204,11 @@ function rememberSocketSession(
   gameState: GameState,
   playerId: string,
 ): SocketSession {
+  const existingSession = socketPlayerMap.get(socket.id);
+  if (existingSession && existingSession.gameId !== gameState.gameId) {
+    socket.leave(existingSession.gameId);
+  }
+
   const session: SocketSession = {
     gameId: gameState.gameId,
     roomCode: gameState.roomCode,
@@ -210,6 +222,7 @@ function rememberSocketSession(
   socketData.gameId = gameState.gameId;
   socketData.roomCode = gameState.roomCode;
   socketData.playerId = playerId;
+  void gamePersistenceService.markPlayerConnected(gameState.gameId, playerId, socket.id);
 
   return session;
 }
@@ -258,6 +271,10 @@ async function restoreSocketSessionFromHandshake(socket: TypedSocket): Promise<v
   try {
     const session = await resolveSocketSession(socket, handshakeIdentifier);
     if (session !== null) {
+      const gameState = await gamePersistenceService.getGameState(session.gameId);
+      if (gameState) {
+        socket.emit(SERVER_EVENTS.GAME_STATE_UPDATE, gameState);
+      }
       logger.info(`Socket ${socket.id} restored session for ${session.gameId}`);
     }
   } catch (error) {
@@ -339,7 +356,7 @@ export function registerSocketHandlers(io: TypedServer): void {
           completeCreateOrJoin(io, gameState.gameId, {
             clientId: socket.id,
             playerId,
-            role: request.role,
+            role: 'PLAYER',
             gameState,
           }, ack);
         } catch (error) {
@@ -381,6 +398,41 @@ export function registerSocketHandlers(io: TypedServer): void {
     );
 
     socket.on(
+      CLIENT_EVENTS.HYDRATE_SESSION,
+      async (
+        request: HydrateSessionRequest,
+        ack: SimpleActionAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
+
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for HYDRATE_SESSION.');
+          return;
+        }
+
+        try {
+          const gameState = await gamePersistenceService.getGameState(session.gameId);
+          if (!gameState || !gameState.playersById[session.playerId]) {
+            rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Game session not found.');
+            return;
+          }
+
+          rememberSocketSession(socket, gameState, session.playerId);
+          completeSync(socket, ack, gameState);
+        } catch (error) {
+          logger.error('HYDRATE_SESSION failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
+
+    socket.on(
       CLIENT_EVENTS.ROLL_DICE,
       async (
         request: RollDiceRequest,
@@ -403,6 +455,39 @@ export function registerSocketHandlers(io: TypedServer): void {
           completeAction(io, gameState.gameId, gameState, ack);
         } catch (error) {
           logger.error('ROLL_DICE failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
+
+    socket.on(
+      CLIENT_EVENTS.BUILD_STRUCTURE,
+      async (
+        request: BuildStructureRequest,
+        ack: SimpleActionAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
+
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for BUILD_STRUCTURE.');
+          return;
+        }
+
+        try {
+          const gameState = await gamePersistenceService.buildStructure(session.gameId, session.playerId, {
+            kind: request.kind,
+            vertexId: request.vertexId,
+            edgeId: request.edgeId,
+          });
+          completeAction(io, gameState.gameId, gameState, ack);
+        } catch (error) {
+          logger.error('BUILD_STRUCTURE failed:', error);
           const message = (error as Error).message;
           rejectAction(socket, ack, resolveErrorCode(message), message);
         }
@@ -473,41 +558,6 @@ export function registerSocketHandlers(io: TypedServer): void {
     );
 
     socket.on(
-      CLIENT_EVENTS.SYNC_GAME_STATE,
-      async (
-        request: SyncGameStateRequest,
-        ack: SimpleActionAck,
-      ) => {
-        const requestedIdentifier = normalizeId(request.gameId);
-        if (requestedIdentifier === null) {
-          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
-          return;
-        }
-
-        const session = await resolveSocketSession(socket, requestedIdentifier);
-        if (session === null) {
-          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for SYNC_GAME_STATE.');
-          return;
-        }
-
-        try {
-          const gameState = await gamePersistenceService.getGameState(session.gameId);
-          if (!gameState || !gameState.playersById[session.playerId]) {
-            rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Game session not found.');
-            return;
-          }
-
-          rememberSocketSession(socket, gameState, session.playerId);
-          completeSync(socket, ack, gameState);
-        } catch (error) {
-          logger.error('SYNC_GAME_STATE failed:', error);
-          const message = (error as Error).message;
-          rejectAction(socket, ack, resolveErrorCode(message), message);
-        }
-      },
-    );
-
-    socket.on(
       CLIENT_EVENTS.SEND_CHAT_MESSAGE,
       async (
         request: SendChatMessageRequest,
@@ -542,6 +592,10 @@ export function registerSocketHandlers(io: TypedServer): void {
 
     socket.on(SocketEvents.Disconnect, () => {
       logger.info(`Client disconnected: ${socket.id}`);
+      const session = socketPlayerMap.get(socket.id);
+      if (session) {
+        void gamePersistenceService.markPlayerDisconnected(session.gameId, session.playerId);
+      }
       socketPlayerMap.delete(socket.id);
     });
   });

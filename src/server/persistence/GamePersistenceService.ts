@@ -1,23 +1,29 @@
+import { Timestamp } from 'firebase-admin/firestore';
+import { PLAYER_COLOR_PALETTE } from '../../shared/constants/playerColors';
+import {
+  buildEdgeLocationFromId,
+  buildVertexLocationFromId,
+  generateBoardTiles,
+  parseEdgeId,
+} from '../../shared/boardLayout';
+import { BUILD_COSTS, type BuildStructureKind } from '../../shared/buildRules';
 import type {
   ChatMessage,
-  GameState,
+  DiceRoll,
   GameConfig,
+  GameState,
   PlayerState,
+  PlayerStats,
   ResourceBundle,
   ResourceType,
-  TurnState,
   StructureState,
-  DiceRoll,
-  PlayerStats,
+  TurnState,
 } from '../../shared/types/domain';
+import { boardRepository } from './boardRepository';
 import { gameSessionsRepository } from './gameSessionsRepository';
 import { playersRepository } from './playersRepository';
-import { boardRepository } from './boardRepository';
 import { turnsRepository } from './turnsRepository';
-import { gameStateStore } from '../sessions/GameStateStore';
 import { logger } from '../utils/logger';
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const DEFAULT_RESOURCES: ResourceBundle = {
   CRYSTAL: 0,
@@ -38,154 +44,311 @@ const DEFAULT_STATS: PlayerStats = {
   turnsPlayed: 0,
 };
 
-const PLAYER_COLORS = ['#E74C3C', '#3498DB', '#2ECC71', '#F39C12'];
 const RESOURCE_TYPES: ResourceType[] = ['CRYSTAL', 'STONE', 'BLOOM', 'EMBER', 'GOLD'];
-
-function isResourceType(value: string): value is ResourceType {
-  return RESOURCE_TYPES.includes(value as ResourceType);
-}
-
-function generateId(prefix: string): string {
-  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function generateRoomCode(): string {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let code = '';
-  for (let i = 0; i < 6; i++) {
-    code += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return code;
-}
 
 function nowISO(): string {
   return new Date().toISOString();
 }
 
-function mergeChatMessages(...messageGroups: Array<ChatMessage[] | undefined>): ChatMessage[] {
-  const messagesById = new Map<string, ChatMessage>();
-
-  for (const messages of messageGroups) {
-    for (const message of messages ?? []) {
-      messagesById.set(message.id, message);
-    }
+function toIso(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
   }
+  if (value && typeof value === 'object' && 'toDate' in value && typeof (value as { toDate?: () => Date }).toDate === 'function') {
+    return (value as { toDate(): Date }).toDate().toISOString();
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value;
+  }
+  return null;
+}
 
-  return Array.from(messagesById.values()).sort((left, right) => (
+function generateId(prefix: string): string {
+  return prefix + '_' + Math.random().toString(36).slice(2, 10);
+}
+
+function generateRoomCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 6; i += 1) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return code;
+}
+
+function sanitizeResourceCount(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.trunc(value));
+}
+
+function sanitizeResourceBundle(bundle: Partial<ResourceBundle> | null | undefined): ResourceBundle {
+  return {
+    CRYSTAL: sanitizeResourceCount(bundle?.CRYSTAL),
+    STONE: sanitizeResourceCount(bundle?.STONE),
+    BLOOM: sanitizeResourceCount(bundle?.BLOOM),
+    EMBER: sanitizeResourceCount(bundle?.EMBER),
+    GOLD: sanitizeResourceCount(bundle?.GOLD),
+  };
+}
+
+function sanitizeGameConfig(config: GameConfig): GameConfig {
+  const playerCount = typeof config.playerCount === 'number' && Number.isFinite(config.playerCount)
+    ? Math.min(4, Math.max(2, Math.trunc(config.playerCount)))
+    : 2;
+  const goalCount = typeof config.goalCount === 'number' && Number.isFinite(config.goalCount)
+    ? Math.max(0, Math.trunc(config.goalCount))
+    : 0;
+  const mapSize = config.mapSize === 'medium' || config.mapSize === 'large' ? config.mapSize : 'small';
+  const winRule = config.winRule === 'ANY_X_GOALS_COMPLETE' || config.winRule === 'FIRST_TO_X_POINTS'
+    ? config.winRule
+    : 'ALL_GOALS_COMPLETE';
+  const timerEnabled = Boolean(config.timerEnabled);
+  const turnTimeSec = timerEnabled && typeof config.turnTimeSec === 'number' && Number.isFinite(config.turnTimeSec)
+    ? Math.max(10, Math.trunc(config.turnTimeSec))
+    : null;
+
+  return {
+    playerCount,
+    goalCount,
+    winRule,
+    mapSeed: typeof config.mapSeed === 'number' && Number.isFinite(config.mapSeed)
+      ? Math.trunc(config.mapSeed)
+      : 0,
+    mapSize,
+    timerEnabled,
+    turnTimeSec,
+    allowReroll: Boolean(config.allowReroll),
+    startingResources: sanitizeResourceBundle(config.startingResources),
+  };
+}
+
+function cloneResources(bundle: ResourceBundle): ResourceBundle {
+  return { ...bundle };
+}
+
+function emptyResourceBundle(): ResourceBundle {
+  return cloneResources(DEFAULT_RESOURCES);
+}
+
+function resourceBundleSum(bundle: ResourceBundle): number {
+  return bundle.CRYSTAL + bundle.STONE + bundle.BLOOM + bundle.EMBER + bundle.GOLD;
+}
+
+function addResources(left: ResourceBundle, right: ResourceBundle): ResourceBundle {
+  return {
+    CRYSTAL: left.CRYSTAL + right.CRYSTAL,
+    STONE: left.STONE + right.STONE,
+    BLOOM: left.BLOOM + right.BLOOM,
+    EMBER: left.EMBER + right.EMBER,
+    GOLD: left.GOLD + right.GOLD,
+  };
+}
+
+function subtractResources(left: ResourceBundle, right: ResourceBundle): ResourceBundle {
+  return {
+    CRYSTAL: left.CRYSTAL - right.CRYSTAL,
+    STONE: left.STONE - right.STONE,
+    BLOOM: left.BLOOM - right.BLOOM,
+    EMBER: left.EMBER - right.EMBER,
+    GOLD: left.GOLD - right.GOLD,
+  };
+}
+
+function hasResources(inventory: ResourceBundle, cost: ResourceBundle): boolean {
+  return inventory.CRYSTAL >= cost.CRYSTAL
+    && inventory.STONE >= cost.STONE
+    && inventory.BLOOM >= cost.BLOOM
+    && inventory.EMBER >= cost.EMBER
+    && inventory.GOLD >= cost.GOLD;
+}
+
+function incrementResource(bundle: ResourceBundle, resourceType: ResourceType, amount: number): void {
+  bundle[resourceType] += amount;
+}
+
+function normalizeChatMessages(messages: ChatMessage[]): ChatMessage[] {
+  return [...messages].sort((left, right) => (
     left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id)
   ));
 }
 
-// ─── Service ──────────────────────────────────────────────────────────────────
+function isResourceType(value: string): value is ResourceType {
+  return RESOURCE_TYPES.includes(value as ResourceType);
+}
+
+function resolveBuildActionType(kind: BuildStructureKind): 'BUILD_ROAD' | 'BUILD_SETTLEMENT' | 'UPGRADE_SETTLEMENT' {
+  if (kind === 'ROAD') {
+    return 'BUILD_ROAD';
+  }
+  if (kind === 'CITY') {
+    return 'UPGRADE_SETTLEMENT';
+  }
+  return 'BUILD_SETTLEMENT';
+}
+
+function resolveStructureAtVertex(gameState: GameState, vertexId: string): StructureState | null {
+  return Object.values(gameState.board.structuresById).find((structure) => structure.vertex?.id === vertexId) ?? null;
+}
+
+function resolveStructureAtEdge(gameState: GameState, edgeId: string): StructureState | null {
+  return Object.values(gameState.board.structuresById).find((structure) => structure.edge?.id === edgeId) ?? null;
+}
+
+function boardHasVertex(gameState: GameState, vertexId: string): boolean {
+  return Object.values(gameState.board.tilesById).some((tile) => tile.vertices.includes(vertexId));
+}
+
+function boardHasEdge(gameState: GameState, edgeId: string): boolean {
+  return Object.values(gameState.board.tilesById).some((tile) => tile.edges.includes(edgeId));
+}
+
+function edgeSharesVertex(existingEdgeId: string, candidateEdgeId: string): boolean {
+  const existing = parseEdgeId(existingEdgeId);
+  const candidate = parseEdgeId(candidateEdgeId);
+  if (existing === null || candidate === null) {
+    return false;
+  }
+
+  return existing[0] === candidate[0]
+    || existing[0] === candidate[1]
+    || existing[1] === candidate[0]
+    || existing[1] === candidate[1];
+}
+
+function canPlaceRoad(gameState: GameState, playerId: string, edgeId: string): boolean {
+  const parsed = parseEdgeId(edgeId);
+  if (parsed === null) {
+    return false;
+  }
+
+  const [leftVertexId, rightVertexId] = parsed;
+  const playerStructures = Object.values(gameState.board.structuresById).filter(
+    (structure) => structure.ownerPlayerId === playerId,
+  );
+
+  if (playerStructures.some((structure) => structure.vertex?.id === leftVertexId || structure.vertex?.id === rightVertexId)) {
+    return true;
+  }
+
+  return playerStructures.some((structure) => structure.edge && edgeSharesVertex(structure.edge.id, edgeId));
+}
+
+function buildResourceCollection(gameState: GameState, sum: number): Map<string, ResourceBundle> {
+  const payouts = new Map<string, ResourceBundle>();
+
+  for (const structure of Object.values(gameState.board.structuresById)) {
+    if (!structure.vertex) {
+      continue;
+    }
+    if (structure.type !== 'SETTLEMENT' && structure.type !== 'CITY') {
+      continue;
+    }
+
+    const yieldCount = structure.type === 'CITY' ? 2 : 1;
+    for (const tileRef of structure.adjacentTiles) {
+      const tileId = tileRef.startsWith('t:') ? tileRef : 't:' + tileRef;
+      const tile = gameState.board.tilesById[tileId];
+      if (!tile || tile.numberToken !== sum || tile.resourceType === 'DESERT') {
+        continue;
+      }
+
+      const current = payouts.get(structure.ownerPlayerId) ?? emptyResourceBundle();
+      incrementResource(current, tile.resourceType, yieldCount);
+      payouts.set(structure.ownerPlayerId, current);
+    }
+  }
+
+  return payouts;
+}
 
 export class GamePersistenceService {
-  // ───────────────────────────────────────────── CREATE GAME ─────────────────
+  private async generateUniqueRoomCode(): Promise<string> {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const roomCode = generateRoomCode();
+      if (!(await gameSessionsRepository.roomCodeExists(roomCode))) {
+        return roomCode;
+      }
+    }
 
-  /**
-   * Creates a new game in Firestore, adds the host as the first player,
-   * and caches the resulting GameState in memory.
-   * Throws on Firestore failure — caller must NOT mutate local state.
-   */
+    throw new Error('Unable to allocate a unique join code');
+  }
+
+  private async loadRequiredGame(identifier: string): Promise<GameState> {
+    const gameState = await this.getGameState(identifier);
+    if (!gameState) {
+      throw new Error('Game ' + identifier + ' not found');
+    }
+    return gameState;
+  }
+
   async createGame(
     displayName: string,
     config: GameConfig,
   ): Promise<{ gameState: GameState; playerId: string }> {
+    const sanitizedConfig = sanitizeGameConfig(config);
     const gameId = generateId('game');
-    const roomCode = generateRoomCode();
+    const roomCode = await this.generateUniqueRoomCode();
     const playerId = generateId('p');
     const now = nowISO();
 
-    const startingResources = config.startingResources ?? DEFAULT_RESOURCES;
-
-    // 1. Write game session to Firestore
     await gameSessionsRepository.createGame({
       gameId,
       roomCode,
       createdBy: playerId,
-      config,
-      startingResources,
+      config: sanitizedConfig,
+      startingResources: sanitizedConfig.startingResources,
     });
 
-    // 2. Write host player to Firestore
     const hostPlayer: PlayerState = {
       playerId,
       userId: playerId,
       displayName,
       avatarUrl: null,
-      color: PLAYER_COLORS[0],
+      color: PLAYER_COLOR_PALETTE[0],
       isHost: true,
-      resources: { ...startingResources },
+      resources: cloneResources(sanitizedConfig.startingResources),
       goals: [],
       stats: { ...DEFAULT_STATS },
       presence: { isConnected: true, lastSeenAt: now, connectionId: '' },
       joinedAt: now,
       updatedAt: now,
     };
+
     await playersRepository.createPlayer(gameId, hostPlayer);
     await gameSessionsRepository.updatePlayerOrder(gameId, [playerId]);
 
-    // 3. Build in-memory GameState
-    const gameState: GameState = {
-      gameId,
-      roomCode,
-      roomStatus: 'waiting',
-      createdBy: playerId,
-      createdAt: now,
-      updatedAt: now,
-      isDeleted: false,
-      winnerPlayerId: null,
-      config,
-      playerOrder: [playerId],
-      playersById: { [playerId]: hostPlayer },
-      board: { tilesById: {}, structuresById: {} },
-      turn: {
-        currentTurn: 0,
-        currentPlayerId: null,
-        currentPlayerIndex: null,
-        phase: null,
-        turnStartedAt: null,
-        turnEndsAt: null,
-        lastDiceRoll: null,
-      },
-      chatMessages: [],
-    };
-
-    // 4. Cache only after all writes succeed
-    gameStateStore.set(gameId, gameState);
-    logger.info(`Game ${gameId} (room ${roomCode}) created by ${displayName}`);
+    const gameState = await this.loadRequiredGame(gameId);
+    logger.info('Game ' + gameId + ' (room ' + roomCode + ') created by ' + displayName);
     return { gameState, playerId };
   }
-
-  // ───────────────────────────────────────────── JOIN GAME ───────────────────
 
   async joinGame(
     joinCode: string,
     displayName: string,
   ): Promise<{ gameState: GameState; playerId: string }> {
-    // Look up game by room code — try cache first, then Firestore
-    const gameState = await this.getGameState(joinCode);
-    if (!gameState) {
-      throw new Error(`No game found with join code ${joinCode}`);
-    }
+    const gameState = await this.loadRequiredGame(joinCode);
     if (gameState.roomStatus !== 'waiting') {
       throw new Error('Game is not accepting new players');
     }
-    const playerCount = Object.keys(gameState.playersById).length;
-    if (playerCount >= gameState.config.playerCount) {
+    if (gameState.playerOrder.length >= gameState.config.playerCount) {
       throw new Error('Game is full');
     }
 
     const playerId = generateId('p');
     const now = nowISO();
-
     const newPlayer: PlayerState = {
       playerId,
       userId: playerId,
       displayName,
       avatarUrl: null,
-      color: PLAYER_COLORS[playerCount],
+      color: PLAYER_COLOR_PALETTE[gameState.playerOrder.length % PLAYER_COLOR_PALETTE.length],
       isHost: false,
-      resources: { ...(gameState.config.startingResources ?? DEFAULT_RESOURCES) },
+      resources: cloneResources(gameState.config.startingResources),
       goals: [],
       stats: { ...DEFAULT_STATS },
       presence: { isConnected: true, lastSeenAt: now, connectionId: '' },
@@ -193,38 +356,36 @@ export class GamePersistenceService {
       updatedAt: now,
     };
 
-    // 1. Write player to Firestore
     await playersRepository.createPlayer(gameState.gameId, newPlayer);
+    await gameSessionsRepository.updatePlayerOrder(gameState.gameId, [...gameState.playerOrder, playerId]);
 
-    // 2. Update player order in Firestore
-    const newOrder = [...gameState.playerOrder, playerId];
-    await gameSessionsRepository.updatePlayerOrder(gameState.gameId, newOrder);
-
-    // 3. Update in-memory state only after writes succeed
-    gameState.playersById[playerId] = newPlayer;
-    gameState.playerOrder = newOrder;
-    gameState.updatedAt = now;
-    gameStateStore.set(gameState.gameId, gameState);
-
-    logger.info(`Player ${displayName} joined game ${gameState.gameId}`);
-    return { gameState, playerId };
+    const updatedGameState = await this.loadRequiredGame(gameState.gameId);
+    logger.info('Player ' + displayName + ' joined game ' + updatedGameState.gameId);
+    return { gameState: updatedGameState, playerId };
   }
-
-  // ───────────────────────────────────────────── START GAME ─────────────────
 
   async startGame(
     gameId: string,
     requestingPlayerId: string,
   ): Promise<GameState> {
-    const gameState = gameStateStore.get(gameId);
-    if (!gameState) throw new Error(`Game ${gameId} not found`);
-    if (gameState.createdBy !== requestingPlayerId) throw new Error('Only the host can start the game');
-    if (gameState.roomStatus !== 'waiting') throw new Error('Game already started');
-    if (Object.keys(gameState.playersById).length < 2) throw new Error('Need at least 2 players');
+    const gameState = await this.loadRequiredGame(gameId);
+    if (gameState.createdBy !== requestingPlayerId) {
+      throw new Error('Only the host can start the game');
+    }
+    if (gameState.roomStatus !== 'waiting') {
+      throw new Error('Game already started');
+    }
+    if (gameState.playerOrder.length < 2) {
+      throw new Error('Need at least 2 players');
+    }
+
+    const firstPlayerId = gameState.playerOrder[0];
+    const firstPlayer = gameState.playersById[firstPlayerId];
+    if (!firstPlayer) {
+      throw new Error('First player not found');
+    }
 
     const now = nowISO();
-    const firstPlayerId = gameState.playerOrder[0];
-
     const turn: TurnState = {
       currentTurn: 1,
       currentPlayerId: firstPlayerId,
@@ -237,218 +398,232 @@ export class GamePersistenceService {
       lastDiceRoll: null,
     };
 
-    // 1. Update game status in Firestore
+    const boardTiles = generateBoardTiles(gameState.config, now);
+
     await gameSessionsRepository.updateGameStatus(gameId, 'in_progress');
-
-    // 2. Write turn state to Firestore
     await gameSessionsRepository.updateTurnState(gameId, turn);
-
-    // 3. Create first turn document in Firestore
-    const firstPlayerName = gameState.playersById[firstPlayerId].displayName;
+    await boardRepository.initTiles(gameId, boardTiles);
     await turnsRepository.createTurn(gameId, {
-      turnId: `turn_1`,
+      turnId: 'turn_1',
       turnNumber: 1,
       playerId: firstPlayerId,
-      playerName: firstPlayerName,
+      playerName: firstPlayer.displayName,
     });
 
-    // 4. Update in-memory state only after all writes succeed
-    gameState.roomStatus = 'in_progress';
-    gameState.turn = turn;
-    gameState.updatedAt = now;
-    gameStateStore.set(gameId, gameState);
-
-    logger.info(`Game ${gameId} started. Turn 1: ${firstPlayerName}`);
-    return gameState;
+    const updatedGameState = await this.loadRequiredGame(gameId);
+    logger.info('Game ' + gameId + ' started. Turn 1: ' + firstPlayer.displayName);
+    return updatedGameState;
   }
-
-  // ───────────────────────────────────────── SETUP PLACEMENT ────────────────
-
-  async setupPlacement(
-    gameId: string,
-    playerId: string,
-    structure: StructureState,
-  ): Promise<GameState> {
-    const gameState = gameStateStore.get(gameId);
-    if (!gameState) throw new Error(`Game ${gameId} not found`);
-
-    // 1. Write structure to Firestore
-    await boardRepository.upsertStructure(gameId, structure);
-
-    // 2. Update player stats in Firestore
-    const player = gameState.playersById[playerId];
-    const updatedStats: PlayerStats = {
-      ...player.stats,
-      settlementsBuilt: structure.type === 'SETTLEMENT'
-        ? player.stats.settlementsBuilt + 1
-        : player.stats.settlementsBuilt,
-      roadsBuilt: structure.type === 'ROAD'
-        ? player.stats.roadsBuilt + 1
-        : player.stats.roadsBuilt,
-    };
-    await playersRepository.updateStats(gameId, playerId, updatedStats);
-
-    // 3. Update in-memory state
-    gameState.board.structuresById[structure.structureId] = structure;
-    gameState.playersById[playerId].stats = updatedStats;
-    gameState.updatedAt = nowISO();
-    gameStateStore.set(gameId, gameState);
-
-    logger.info(`Setup placement: ${structure.type} by ${playerId} in game ${gameId}`);
-    return gameState;
-  }
-
-  // ───────────────────────────────────────────── ROLL DICE ──────────────────
 
   async rollDice(
     gameId: string,
     playerId: string,
   ): Promise<GameState> {
-    const gameState = gameStateStore.get(gameId);
-    if (!gameState) throw new Error(`Game ${gameId} not found`);
-    if (gameState.turn.currentPlayerId !== playerId) throw new Error('Not the active player');
-    if (gameState.turn.phase !== 'ROLL') throw new Error('Not in ROLL phase');
+    const gameState = await this.loadRequiredGame(gameId);
+    if (gameState.roomStatus !== 'in_progress') {
+      throw new Error('Cannot roll dice unless the game is in progress');
+    }
+    if (gameState.turn.currentPlayerId !== playerId) {
+      throw new Error('Only the active player can roll dice');
+    }
+    if (gameState.turn.phase !== 'ROLL') {
+      throw new Error('Dice can only be rolled during the ROLL phase');
+    }
+    if (gameState.turn.lastDiceRoll !== null) {
+      throw new Error('Dice have already been rolled this turn');
+    }
 
     const d1 = Math.floor(Math.random() * 6) + 1;
     const d2 = Math.floor(Math.random() * 6) + 1;
     const sum = d1 + d2;
-    const now = nowISO();
+    const rolledAt = nowISO();
+    const diceRoll: DiceRoll = { d1Val: d1, d2Val: d2, sum, rolledAt };
+    const turnId = 'turn_' + gameState.turn.currentTurn;
 
-    const diceRoll: DiceRoll = { d1Val: d1, d2Val: d2, sum, rolledAt: now };
-    const turnId = `turn_${gameState.turn.currentTurn}`;
-
-    // 1. Record dice roll in turn document
     await turnsRepository.recordDiceRoll(gameId, turnId, { d1, d2, sum });
 
-    // 2. Update turn state on game session
-    const updatedTurn: TurnState = {
+    const payouts = buildResourceCollection(gameState, sum);
+    for (const [targetPlayerId, bundle] of payouts.entries()) {
+      const currentPlayer = gameState.playersById[targetPlayerId];
+      if (!currentPlayer || resourceBundleSum(bundle) === 0) {
+        continue;
+      }
+
+      const updatedResources = addResources(currentPlayer.resources, bundle);
+      const updatedStats: PlayerStats = {
+        ...currentPlayer.stats,
+        totalResourcesCollected: currentPlayer.stats.totalResourcesCollected + resourceBundleSum(bundle),
+      };
+
+      await playersRepository.updateResources(gameId, targetPlayerId, updatedResources);
+      await playersRepository.updateStats(gameId, targetPlayerId, updatedStats);
+    }
+
+    if (payouts.size > 0) {
+      await turnsRepository.appendAction(gameId, turnId, {
+        actionId: generateId('collect'),
+        type: 'COLLECT_RESOURCES',
+        timestamp: Timestamp.now(),
+        result: {
+          payoutsByPlayer: Object.fromEntries(
+            Array.from(payouts.entries()).map(([targetPlayerId, bundle]) => [targetPlayerId, bundle]),
+          ),
+        },
+      });
+    }
+
+    await gameSessionsRepository.updateTurnState(gameId, {
       ...gameState.turn,
       phase: 'ACTION',
       lastDiceRoll: diceRoll,
-    };
-    await gameSessionsRepository.updateTurnState(gameId, updatedTurn);
+    });
 
-    // 3. Update in-memory state
-    gameState.turn = updatedTurn;
-    gameState.updatedAt = now;
-    gameStateStore.set(gameId, gameState);
-
-    logger.info(`Dice roll in game ${gameId}: ${d1}+${d2}=${sum}`);
-    return gameState;
+    const updatedGameState = await this.loadRequiredGame(gameId);
+    logger.info('Dice roll in game ' + gameId + ': ' + d1 + '+' + d2 + '=' + sum);
+    return updatedGameState;
   }
-
-  // ──────────────────────────────────────── BUILD STRUCTURE ─────────────────
 
   async buildStructure(
     gameId: string,
     playerId: string,
-    structure: StructureState,
-    cost: ResourceBundle,
+    request: { kind: BuildStructureKind; vertexId?: string; edgeId?: string },
   ): Promise<GameState> {
-    const gameState = gameStateStore.get(gameId);
-    if (!gameState) throw new Error(`Game ${gameId} not found`);
-    if (gameState.turn.currentPlayerId !== playerId) throw new Error('Not the active player');
-    if (gameState.turn.phase !== 'ACTION') throw new Error('Not in ACTION phase');
+    const gameState = await this.loadRequiredGame(gameId);
+    if (gameState.roomStatus !== 'in_progress') {
+      throw new Error('Builds are only allowed during an active game');
+    }
+    if (gameState.turn.currentPlayerId !== playerId) {
+      throw new Error('Only the active player can build');
+    }
+    if (gameState.turn.phase !== 'ACTION') {
+      throw new Error('Builds are only allowed during the ACTION phase');
+    }
 
     const player = gameState.playersById[playerId];
+    if (!player) {
+      throw new Error('Player not found');
+    }
 
-    // Compute new resources after spending cost
-    const newResources: ResourceBundle = {
-      CRYSTAL: player.resources.CRYSTAL - cost.CRYSTAL,
-      STONE: player.resources.STONE - cost.STONE,
-      BLOOM: player.resources.BLOOM - cost.BLOOM,
-      EMBER: player.resources.EMBER - cost.EMBER,
-      GOLD: player.resources.GOLD - cost.GOLD,
-    };
+    const cost = BUILD_COSTS[request.kind];
+    if (!hasResources(player.resources, cost)) {
+      throw new Error('Insufficient resources');
+    }
 
-    // 1. Write structure to Firestore
-    await boardRepository.upsertStructure(gameId, structure);
-
-    // 2. Deduct resources in Firestore
-    await playersRepository.updateResources(gameId, playerId, newResources);
-
-    // 3. Update stats in Firestore
-    const updatedStats: PlayerStats = {
+    const now = nowISO();
+    const spent = resourceBundleSum(cost);
+    const updatedResources = subtractResources(player.resources, cost);
+    let updatedStats: PlayerStats = {
       ...player.stats,
-      settlementsBuilt: structure.type === 'SETTLEMENT'
-        ? player.stats.settlementsBuilt + 1
-        : player.stats.settlementsBuilt,
-      roadsBuilt: structure.type === 'ROAD'
-        ? player.stats.roadsBuilt + 1
-        : player.stats.roadsBuilt,
-      totalResourcesSpent: player.stats.totalResourcesSpent
-        + cost.CRYSTAL + cost.STONE + cost.BLOOM + cost.EMBER + cost.GOLD,
+      totalResourcesSpent: player.stats.totalResourcesSpent + spent,
     };
-    await playersRepository.updateStats(gameId, playerId, updatedStats);
+    let structureToPersist: StructureState;
 
-    // 4. Log action in turn document
-    const turnId = `turn_${gameState.turn.currentTurn}`;
-    const actionType = structure.type === 'ROAD' ? 'BUILD_ROAD' : 'BUILD_SETTLEMENT';
-    await turnsRepository.appendAction(gameId, turnId, {
+    if (request.kind === 'SETTLEMENT') {
+      if (!request.vertexId || !boardHasVertex(gameState, request.vertexId)) {
+        throw new Error('Invalid settlement location');
+      }
+      if (resolveStructureAtVertex(gameState, request.vertexId)) {
+        throw new Error('That settlement location is already occupied');
+      }
+
+      const vertex = buildVertexLocationFromId(request.vertexId);
+      structureToPersist = {
+        structureId: 'settlement:' + playerId + ':' + request.vertexId,
+        ownerPlayerId: playerId,
+        ownerName: player.displayName,
+        ownerColor: player.color,
+        type: 'SETTLEMENT',
+        level: 1,
+        locationType: 'VERTEX',
+        vertex,
+        edge: null,
+        adjacentStructures: [],
+        adjacentTiles: vertex.adjacentHexes.map((coord) => 't:' + coord.q + ',' + coord.r),
+        builtAtTurn: gameState.turn.currentTurn,
+        builtAt: now,
+        cost,
+        roadPath: null,
+      };
+      updatedStats = {
+        ...updatedStats,
+        settlementsBuilt: updatedStats.settlementsBuilt + 1,
+        publicVP: updatedStats.publicVP + 1,
+      };
+    } else if (request.kind === 'CITY') {
+      if (!request.vertexId || !boardHasVertex(gameState, request.vertexId)) {
+        throw new Error('Invalid city location');
+      }
+
+      const existingStructure = resolveStructureAtVertex(gameState, request.vertexId);
+      if (!existingStructure || existingStructure.ownerPlayerId !== playerId || existingStructure.type !== 'SETTLEMENT') {
+        throw new Error('You can only upgrade your own settlement');
+      }
+
+      structureToPersist = {
+        ...existingStructure,
+        ownerName: player.displayName,
+        ownerColor: player.color,
+        type: 'CITY',
+        level: 2,
+        builtAtTurn: gameState.turn.currentTurn,
+        builtAt: now,
+        cost,
+      };
+      updatedStats = {
+        ...updatedStats,
+        citiesBuilt: updatedStats.citiesBuilt + 1,
+        publicVP: updatedStats.publicVP + 1,
+      };
+    } else {
+      if (!request.edgeId || !boardHasEdge(gameState, request.edgeId)) {
+        throw new Error('Invalid road location');
+      }
+      if (resolveStructureAtEdge(gameState, request.edgeId)) {
+        throw new Error('That road location is already occupied');
+      }
+      if (!canPlaceRoad(gameState, playerId, request.edgeId)) {
+        throw new Error('Road must connect to one of your existing roads or structures');
+      }
+
+      structureToPersist = {
+        structureId: 'road:' + playerId + ':' + request.edgeId,
+        ownerPlayerId: playerId,
+        ownerName: player.displayName,
+        ownerColor: player.color,
+        type: 'ROAD',
+        level: 1,
+        locationType: 'EDGE',
+        vertex: null,
+        edge: buildEdgeLocationFromId(request.edgeId),
+        adjacentStructures: [],
+        adjacentTiles: [],
+        builtAtTurn: gameState.turn.currentTurn,
+        builtAt: now,
+        cost,
+        roadPath: null,
+      };
+      updatedStats = {
+        ...updatedStats,
+        roadsBuilt: updatedStats.roadsBuilt + 1,
+      };
+    }
+
+    await boardRepository.upsertStructure(gameId, structureToPersist);
+    await playersRepository.updateResources(gameId, playerId, updatedResources);
+    await playersRepository.updateStats(gameId, playerId, updatedStats);
+    await gameSessionsRepository.touchGame(gameId);
+    await turnsRepository.appendAction(gameId, 'turn_' + gameState.turn.currentTurn, {
       actionId: generateId('act'),
-      type: actionType,
-      timestamp: new Date() as unknown as FirebaseFirestore.Timestamp,
-      structureId: structure.structureId,
+      type: resolveBuildActionType(request.kind),
+      timestamp: Timestamp.now(),
+      structureId: structureToPersist.structureId,
+      location: request.vertexId ? { vertexId: request.vertexId } : { edgeId: request.edgeId },
       cost,
     });
 
-    // 5. Update in-memory state
-    gameState.board.structuresById[structure.structureId] = structure;
-    gameState.playersById[playerId].resources = newResources;
-    gameState.playersById[playerId].stats = updatedStats;
-    gameState.updatedAt = nowISO();
-    gameStateStore.set(gameId, gameState);
-
-    logger.info(`Build ${structure.type} by ${playerId} in game ${gameId}`);
-    return gameState;
-  }
-
-  // ────────────────────────────────────────────── TRADE ─────────────────────
-
-  async trade(
-    gameId: string,
-    givingPlayerId: string,
-    receivingPlayerId: string,
-    offered: ResourceBundle,
-    requested: ResourceBundle,
-  ): Promise<GameState> {
-    const gameState = gameStateStore.get(gameId);
-    if (!gameState) throw new Error(`Game ${gameId} not found`);
-
-    const giver = gameState.playersById[givingPlayerId];
-    const receiver = gameState.playersById[receivingPlayerId];
-    if (!giver || !receiver) throw new Error('Player not found');
-
-    const giverResources: ResourceBundle = {
-      CRYSTAL: giver.resources.CRYSTAL - offered.CRYSTAL + requested.CRYSTAL,
-      STONE: giver.resources.STONE - offered.STONE + requested.STONE,
-      BLOOM: giver.resources.BLOOM - offered.BLOOM + requested.BLOOM,
-      EMBER: giver.resources.EMBER - offered.EMBER + requested.EMBER,
-      GOLD: giver.resources.GOLD - offered.GOLD + requested.GOLD,
-    };
-
-    const receiverResources: ResourceBundle = {
-      CRYSTAL: receiver.resources.CRYSTAL + offered.CRYSTAL - requested.CRYSTAL,
-      STONE: receiver.resources.STONE + offered.STONE - requested.STONE,
-      BLOOM: receiver.resources.BLOOM + offered.BLOOM - requested.BLOOM,
-      EMBER: receiver.resources.EMBER + offered.EMBER - requested.EMBER,
-      GOLD: receiver.resources.GOLD + offered.GOLD - requested.GOLD,
-    };
-
-    // 1. Update giver resources in Firestore
-    await playersRepository.updateResources(gameId, givingPlayerId, giverResources);
-
-    // 2. Update receiver resources in Firestore
-    await playersRepository.updateResources(gameId, receivingPlayerId, receiverResources);
-
-    // 3. Update in-memory state
-    gameState.playersById[givingPlayerId].resources = giverResources;
-    gameState.playersById[receivingPlayerId].resources = receiverResources;
-    gameState.updatedAt = nowISO();
-    gameStateStore.set(gameId, gameState);
-
-    logger.info(`Trade between ${givingPlayerId} and ${receivingPlayerId} in game ${gameId}`);
-    return gameState;
+    const updatedGameState = await this.loadRequiredGame(gameId);
+    logger.info('Build ' + request.kind + ' by ' + playerId + ' in game ' + gameId);
+    return updatedGameState;
   }
 
   async bankTrade(
@@ -457,11 +632,16 @@ export class GamePersistenceService {
     giveResource: string,
     receiveResource: string,
   ): Promise<GameState> {
-    const gameState = await this.getGameState(gameId);
-    if (!gameState) throw new Error(`Game ${gameId} not found`);
-    if (gameState.roomStatus !== 'in_progress') throw new Error('Bank trade is only allowed during an active game');
-    if (gameState.turn.currentPlayerId !== playerId) throw new Error('Only the active player can bank trade');
-    if (gameState.turn.phase !== 'ACTION') throw new Error('Bank trade is only allowed during the ACTION phase');
+    const gameState = await this.loadRequiredGame(gameId);
+    if (gameState.roomStatus !== 'in_progress') {
+      throw new Error('Bank trade is only allowed during an active game');
+    }
+    if (gameState.turn.currentPlayerId !== playerId) {
+      throw new Error('Only the active player can bank trade');
+    }
+    if (gameState.turn.phase !== 'ACTION') {
+      throw new Error('Bank trade is only allowed during the ACTION phase');
+    }
     if (!isResourceType(giveResource) || !isResourceType(receiveResource)) {
       throw new Error('Invalid resource type');
     }
@@ -470,68 +650,85 @@ export class GamePersistenceService {
     }
 
     const player = gameState.playersById[playerId];
-    if (!player) throw new Error('Player not found');
-
-    const currentAmount = player.resources[giveResource] ?? 0;
-    if (currentAmount < 4) {
-      throw new Error(`Need 4 ${giveResource} to bank trade`);
+    if (!player) {
+      throw new Error('Player not found');
+    }
+    if (player.resources[giveResource] < 4) {
+      throw new Error('Need 4 ' + giveResource + ' to bank trade');
     }
 
     const updatedResources: ResourceBundle = {
       ...player.resources,
-      [giveResource]: currentAmount - 4,
-      [receiveResource]: (player.resources[receiveResource] ?? 0) + 1,
+      [giveResource]: player.resources[giveResource] - 4,
+      [receiveResource]: player.resources[receiveResource] + 1,
+    };
+    const updatedStats: PlayerStats = {
+      ...player.stats,
+      totalResourcesSpent: player.stats.totalResourcesSpent + 4,
     };
 
-    await playersRepository.updateResources(gameState.gameId, playerId, updatedResources);
+    await playersRepository.updateResources(gameId, playerId, updatedResources);
+    await playersRepository.updateStats(gameId, playerId, updatedStats);
+    await gameSessionsRepository.touchGame(gameId);
+    await turnsRepository.appendAction(gameId, 'turn_' + gameState.turn.currentTurn, {
+      actionId: generateId('bank'),
+      type: 'COLLECT_RESOURCES',
+      timestamp: Timestamp.now(),
+      result: {
+        trade: {
+          giveResource,
+          receiveResource,
+        },
+      },
+    });
 
-    gameState.playersById[playerId] = {
-      ...player,
-      resources: updatedResources,
-      updatedAt: nowISO(),
-    };
-    gameState.updatedAt = nowISO();
-    gameStateStore.set(gameState.gameId, gameState);
-
-    logger.info(`Bank trade by ${playerId} in game ${gameState.gameId}`);
-    return gameState;
+    const updatedGameState = await this.loadRequiredGame(gameId);
+    logger.info('Bank trade by ' + playerId + ' in game ' + gameId);
+    return updatedGameState;
   }
-
-  // ───────────────────────────────────────────── END TURN ───────────────────
 
   async endTurn(
     gameId: string,
     playerId: string,
   ): Promise<GameState> {
-    const gameState = gameStateStore.get(gameId);
-    if (!gameState) throw new Error(`Game ${gameId} not found`);
-    if (gameState.turn.currentPlayerId !== playerId) throw new Error('Not the active player');
+    const gameState = await this.loadRequiredGame(gameId);
+    if (gameState.roomStatus !== 'in_progress') {
+      throw new Error('Cannot end turn unless the room is in progress');
+    }
+    if (gameState.turn.currentPlayerId !== playerId) {
+      throw new Error('Only the active player can end the turn');
+    }
+    if (gameState.turn.lastDiceRoll === null) {
+      throw new Error('You must roll dice before ending the turn');
+    }
+    if (gameState.turn.phase !== 'ACTION') {
+      throw new Error('Turn can only end during the ACTION phase after rolling dice');
+    }
 
     const currentTurnNum = gameState.turn.currentTurn;
-    const turnId = `turn_${currentTurnNum}`;
+    const turnId = 'turn_' + currentTurnNum;
     const now = nowISO();
-
-    // Calculate turn duration
-    const startedAt = gameState.turn.turnStartedAt
-      ? new Date(gameState.turn.turnStartedAt).getTime()
-      : Date.now();
-    const durationSec = Math.round((Date.now() - startedAt) / 1000);
-
-    // Advance to next player
     const currentIndex = gameState.turn.currentPlayerIndex ?? 0;
     const nextIndex = (currentIndex + 1) % gameState.playerOrder.length;
     const nextPlayerId = gameState.playerOrder[nextIndex];
-    const nextTurnNum = currentTurnNum + 1;
+    const nextPlayer = gameState.playersById[nextPlayerId];
+    if (!nextPlayer) {
+      throw new Error('Next player not found');
+    }
 
-    // Update current player stats
-    const currentPlayer = gameState.playersById[playerId];
-    const updatedStats: PlayerStats = {
-      ...currentPlayer.stats,
-      turnsPlayed: currentPlayer.stats.turnsPlayed + 1,
-    };
+    const startedAt = gameState.turn.turnStartedAt
+      ? new Date(gameState.turn.turnStartedAt).getTime()
+      : Date.now();
+    const durationSec = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+
+    await turnsRepository.completeTurn(gameId, turnId, durationSec);
+    await playersRepository.updateStats(gameId, playerId, {
+      ...gameState.playersById[playerId].stats,
+      turnsPlayed: gameState.playersById[playerId].stats.turnsPlayed + 1,
+    });
 
     const nextTurn: TurnState = {
-      currentTurn: nextTurnNum,
+      currentTurn: currentTurnNum + 1,
       currentPlayerId: nextPlayerId,
       currentPlayerIndex: nextIndex,
       phase: 'ROLL',
@@ -542,63 +739,26 @@ export class GamePersistenceService {
       lastDiceRoll: null,
     };
 
-    // 1. Complete current turn in Firestore
-    await turnsRepository.completeTurn(gameId, turnId, durationSec);
-
-    // 2. Update player stats in Firestore
-    await playersRepository.updateStats(gameId, playerId, updatedStats);
-
-    // 3. Create next turn document in Firestore
-    const nextPlayerName = gameState.playersById[nextPlayerId].displayName;
     await turnsRepository.createTurn(gameId, {
-      turnId: `turn_${nextTurnNum}`,
-      turnNumber: nextTurnNum,
+      turnId: 'turn_' + nextTurn.currentTurn,
+      turnNumber: nextTurn.currentTurn,
       playerId: nextPlayerId,
-      playerName: nextPlayerName,
+      playerName: nextPlayer.displayName,
     });
-
-    // 4. Update turn state on game session in Firestore
     await gameSessionsRepository.updateTurnState(gameId, nextTurn);
 
-    // 5. Update in-memory state
-    gameState.playersById[playerId].stats = updatedStats;
-    gameState.turn = nextTurn;
-    gameState.updatedAt = now;
-    gameStateStore.set(gameId, gameState);
-
-    logger.info(`Turn ${currentTurnNum} ended. Turn ${nextTurnNum}: ${nextPlayerName}`);
-    return gameState;
+    const updatedGameState = await this.loadRequiredGame(gameId);
+    logger.info('Turn ' + currentTurnNum + ' ended. Turn ' + nextTurn.currentTurn + ': ' + nextPlayer.displayName);
+    return updatedGameState;
   }
-
-  // ──────────────────────────────────────── FINALIZE GAME ───────────────────
 
   async finalizeGame(
     gameId: string,
     winnerId: string,
   ): Promise<GameState> {
-    const gameState = gameStateStore.get(gameId);
-    if (!gameState) throw new Error(`Game ${gameId} not found`);
-
-    // 1. Finalize in Firestore (transactional — idempotent)
     await gameSessionsRepository.finalizeGame(gameId, winnerId);
-
-    // 2. Complete the current turn if one is in progress
-    const turnId = `turn_${gameState.turn.currentTurn}`;
-    const startedAt = gameState.turn.turnStartedAt
-      ? new Date(gameState.turn.turnStartedAt).getTime()
-      : Date.now();
-    const durationSec = Math.round((Date.now() - startedAt) / 1000);
-    await turnsRepository.completeTurn(gameId, turnId, durationSec).catch(() => {
-      // Turn may not exist if game ends during setup — safe to ignore
-    });
-
-    // 3. Update in-memory state
-    gameState.roomStatus = 'finished';
-    gameState.winnerPlayerId = winnerId;
-    gameState.updatedAt = nowISO();
-    gameStateStore.set(gameId, gameState);
-
-    logger.info(`Game ${gameId} finished. Winner: ${winnerId}`);
+    const gameState = await this.loadRequiredGame(gameId);
+    logger.info('Game ' + gameId + ' finished. Winner: ' + winnerId);
     return gameState;
   }
 
@@ -607,14 +767,16 @@ export class GamePersistenceService {
     playerId: string,
     rawMessage: string,
   ): Promise<GameState> {
-    const gameState = await this.getGameState(gameId);
-    if (!gameState) throw new Error(`Game ${gameId} not found`);
-
+    const gameState = await this.loadRequiredGame(gameId);
     const player = gameState.playersById[playerId];
-    if (!player) throw new Error('Player not found');
+    if (!player) {
+      throw new Error('Player not found');
+    }
 
     const message = rawMessage.trim();
-    if (!message) throw new Error('Chat message cannot be empty');
+    if (!message) {
+      throw new Error('Chat message cannot be empty');
+    }
 
     const chatMessage: ChatMessage = {
       id: generateId('chat'),
@@ -624,14 +786,36 @@ export class GamePersistenceService {
       timestamp: nowISO(),
     };
 
-    await gameSessionsRepository.appendChatMessage(gameState.gameId, chatMessage);
+    await gameSessionsRepository.appendChatMessage(gameId, chatMessage);
+    const updatedGameState = await this.loadRequiredGame(gameId);
+    logger.info('Chat message by ' + playerId + ' in game ' + gameId);
+    return updatedGameState;
+  }
 
-    gameState.chatMessages = [...(gameState.chatMessages ?? []), chatMessage];
-    gameState.updatedAt = nowISO();
-    gameStateStore.set(gameState.gameId, gameState);
+  async markPlayerConnected(gameId: string, playerId: string, connectionId: string): Promise<void> {
+    const player = await playersRepository.getPlayer(gameId, playerId);
+    if (!player) {
+      return;
+    }
 
-    logger.info(`Chat message by ${playerId} in game ${gameState.gameId}`);
-    return gameState;
+    await playersRepository.updatePresence(gameId, playerId, {
+      isConnected: true,
+      lastSeenAt: nowISO(),
+      connectionId,
+    });
+  }
+
+  async markPlayerDisconnected(gameId: string, playerId: string): Promise<void> {
+    const player = await playersRepository.getPlayer(gameId, playerId);
+    if (!player) {
+      return;
+    }
+
+    await playersRepository.updatePresence(gameId, playerId, {
+      isConnected: false,
+      lastSeenAt: nowISO(),
+      connectionId: '',
+    });
   }
 
   async getGameState(identifier: string): Promise<GameState | null> {
@@ -642,18 +826,6 @@ export class GamePersistenceService {
 
     const candidates = Array.from(new Set([normalizedIdentifier, normalizedIdentifier.toUpperCase()]));
     for (const candidate of candidates) {
-      const cachedById = gameStateStore.get(candidate);
-      if (cachedById) {
-        return cachedById;
-      }
-
-      const cachedByRoomCode = gameStateStore.findByRoomCode(candidate);
-      if (cachedByRoomCode) {
-        return cachedByRoomCode;
-      }
-    }
-
-    for (const candidate of candidates) {
       const loadedGame = await this.loadGame(candidate);
       if (loadedGame) {
         return loadedGame;
@@ -663,84 +835,58 @@ export class GamePersistenceService {
     return null;
   }
 
-  // ──────────────────────────────────────── LOAD GAME ───────────────────────
-
-  /**
-   * Reconstructs a full GameState from Firestore documents.
-   * Looks up the game by roomCode if the input looks like a room code (6 chars),
-   * otherwise treats it as a gameId.
-   */
   async loadGame(identifier: string): Promise<GameState | null> {
-    // Resolve the game session doc
     let gameDoc = await gameSessionsRepository.getGame(identifier);
     if (!gameDoc) {
       gameDoc = await gameSessionsRepository.getGameByRoomCode(identifier);
     }
-    if (!gameDoc || gameDoc.isDeleted) return null;
-
-    const gameId = gameDoc.gameId;
-
-    // Fetch all subcollections in parallel
-    const [players, tilesById, structuresById, chatMessages] = await Promise.all([
-      playersRepository.getPlayers(gameId),
-      boardRepository.getTiles(gameId),
-      boardRepository.getStructures(gameId),
-      gameSessionsRepository.getChatMessages(gameId),
-    ]);
-
-    // Build playersById map
-    const playersById: Record<string, PlayerState> = {};
-    for (const p of players) {
-      playersById[p.playerId] = p;
+    if (!gameDoc || gameDoc.isDeleted) {
+      return null;
     }
 
-    // Convert Firestore timestamps to ISO strings
-    const toISO = (ts: FirebaseFirestore.Timestamp | null | undefined): string | null => {
-      if (!ts) return null;
-      if (typeof (ts as { toDate?: () => Date }).toDate === 'function') {
-        return (ts as unknown as { toDate(): Date }).toDate().toISOString();
-      }
-      return String(ts);
-    };
+    const [players, tilesById, structuresById, chatMessages] = await Promise.all([
+      playersRepository.getPlayers(gameDoc.gameId),
+      boardRepository.getTiles(gameDoc.gameId),
+      boardRepository.getStructures(gameDoc.gameId),
+      gameSessionsRepository.getChatMessages(gameDoc.gameId),
+    ]);
 
-    const lastDiceRoll: GameState['turn']['lastDiceRoll'] = gameDoc.lastDiceRoll
-      ? {
-          d1Val: gameDoc.lastDiceRoll.d1Val,
-          d2Val: gameDoc.lastDiceRoll.d2Val,
-          sum: gameDoc.lastDiceRoll.sum,
-          rolledAt: toISO(gameDoc.lastDiceRoll.rolledAt) ?? nowISO(),
-        }
-      : null;
+    const playersById = Object.fromEntries(players.map((player) => [player.playerId, player]));
 
-    const gameState: GameState = {
+    return {
       gameId: gameDoc.gameId,
       roomCode: gameDoc.roomCode,
       roomStatus: gameDoc.status,
       createdBy: gameDoc.createdBy,
-      createdAt: toISO(gameDoc.createdAt) ?? nowISO(),
-      updatedAt: toISO(gameDoc.updatedAt) ?? nowISO(),
+      createdAt: toIso(gameDoc.createdAt) ?? nowISO(),
+      updatedAt: toIso(gameDoc.updatedAt) ?? nowISO(),
       isDeleted: gameDoc.isDeleted,
       winnerPlayerId: gameDoc.winnerPlayerId,
-      config: gameDoc.config,
+      config: sanitizeGameConfig(gameDoc.config),
       playerOrder: gameDoc.playerOrder,
       playersById,
-      board: { tilesById, structuresById },
+      board: {
+        tilesById,
+        structuresById,
+      },
       turn: {
         currentTurn: gameDoc.currentTurn,
         currentPlayerId: gameDoc.currentPlayerId,
         currentPlayerIndex: gameDoc.currentPlayerIndex,
         phase: gameDoc.phase,
-        turnStartedAt: toISO(gameDoc.turnStartedAt),
-        turnEndsAt: toISO(gameDoc.turnEndsAt),
-        lastDiceRoll,
+        turnStartedAt: toIso(gameDoc.turnStartedAt),
+        turnEndsAt: toIso(gameDoc.turnEndsAt),
+        lastDiceRoll: gameDoc.lastDiceRoll
+          ? {
+              d1Val: gameDoc.lastDiceRoll.d1Val,
+              d2Val: gameDoc.lastDiceRoll.d2Val,
+              sum: gameDoc.lastDiceRoll.sum,
+              rolledAt: toIso(gameDoc.lastDiceRoll.rolledAt) ?? nowISO(),
+            }
+          : null,
       },
-      chatMessages: mergeChatMessages(gameDoc.chatMessages, chatMessages),
+      chatMessages: normalizeChatMessages(chatMessages),
     };
-
-    // Cache the loaded state
-    gameStateStore.set(gameId, gameState);
-    logger.info(`Game ${gameId} loaded from Firestore`);
-    return gameState;
   }
 }
 

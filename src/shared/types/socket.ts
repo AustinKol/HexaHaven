@@ -6,10 +6,10 @@
 //   Client: Socket<ServerToClientEvents, ClientToServerEvents>
 
 import type {
-  ClientRole,
   GameConfig,
   GameState,
 } from './domain';
+import type { BuildStructureKind } from '../buildRules';
 
 // ─── Ack types ───────────────────────────────────────────────────────
 
@@ -42,15 +42,25 @@ export interface CreateGameRequest {
 export interface JoinGameRequest {
   joinCode: string;
   displayName: string;
-  role: ClientRole;
 }
 
 export interface StartGameRequest {
   gameId: string;
 }
 
+export interface HydrateSessionRequest {
+  gameId: string;
+}
+
 export interface RollDiceRequest {
   gameId: string;
+}
+
+export interface BuildStructureRequest {
+  gameId: string;
+  kind: BuildStructureKind;
+  vertexId?: string;
+  edgeId?: string;
 }
 
 export interface EndTurnRequest {
@@ -61,11 +71,6 @@ export interface BankTradeRequest {
   gameId: string;
   giveResource: 'EMBER' | 'GOLD' | 'STONE' | 'BLOOM' | 'CRYSTAL';
   receiveResource: 'EMBER' | 'GOLD' | 'STONE' | 'BLOOM' | 'CRYSTAL';
-}
-
-export interface SyncGameStateRequest {
-  gameId: string;
-  gameState: GameState;
 }
 
 export interface SendChatMessageRequest {
@@ -85,7 +90,7 @@ export interface CreateGameAckData {
 export interface JoinGameAckData {
   clientId: string;
   playerId: string;
-  role: ClientRole;
+  role: 'PLAYER';
   gameState: GameState;
 }
 
@@ -119,8 +124,16 @@ export interface ClientToServerEvents {
     request: StartGameRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,
   ) => void;
+  HYDRATE_SESSION: (
+    request: HydrateSessionRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
   ROLL_DICE: (
     request: RollDiceRequest,
+    ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  BUILD_STRUCTURE: (
+    request: BuildStructureRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,
   ) => void;
   BANK_TRADE: (
@@ -129,10 +142,6 @@ export interface ClientToServerEvents {
   ) => void;
   END_TURN: (
     request: EndTurnRequest,
-    ack: (response: SocketAck<SimpleActionAckData>) => void,
-  ) => void;
-  SYNC_GAME_STATE: (
-    request: SyncGameStateRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,
   ) => void;
   SEND_CHAT_MESSAGE: (

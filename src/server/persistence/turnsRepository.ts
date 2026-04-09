@@ -1,4 +1,4 @@
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import type { ResourceBundle, TurnRecordStatus } from '../../shared/types/domain';
 import { FirestoreRepository } from './FirestoreRepository';
 
@@ -35,6 +35,19 @@ export interface TurnDoc {
   startedAt: FirebaseFirestore.Timestamp;
   endedAt: FirebaseFirestore.Timestamp | null;
   duration: number | null; // seconds elapsed
+}
+
+function normalizeTimestampValue(value: unknown): FirebaseFirestore.Timestamp | Date {
+  if (value && typeof value === 'object' && 'toDate' in value && typeof value.toDate === 'function') {
+    return value as FirebaseFirestore.Timestamp;
+  }
+  if (value instanceof Date) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return new Date(value);
+  }
+  return Timestamp.now();
 }
 
 // ─── Repository ───────────────────────────────────────────────────────────────
@@ -81,7 +94,7 @@ export class TurnsRepository extends FirestoreRepository {
    */
   async appendAction(gameId: string, turnId: string, action: TurnAction): Promise<void> {
     await this.turnsCol(gameId).doc(turnId).update({
-      actions: FieldValue.arrayUnion({ ...action, timestamp: new Date(action.timestamp as unknown as string) }),
+      actions: FieldValue.arrayUnion({ ...action, timestamp: normalizeTimestampValue(action.timestamp) }),
     });
   }
 
@@ -94,16 +107,17 @@ export class TurnsRepository extends FirestoreRepository {
     turnId: string,
     roll: { d1: number; d2: number; sum: number },
   ): Promise<void> {
+    const now = Timestamp.now();
     const diceRollEntry = {
       d1: roll.d1,
       d2: roll.d2,
       sum: roll.sum,
-      rolledAt: FieldValue.serverTimestamp(),
+      rolledAt: now,
     };
-    const action: Omit<TurnAction, 'timestamp'> & { timestamp: unknown } = {
+    const action: TurnAction = {
       actionId: `dice_${Date.now()}`,
       type: 'DICE_ROLL',
-      timestamp: FieldValue.serverTimestamp(),
+      timestamp: now,
       result: { d1: roll.d1, d2: roll.d2, sum: roll.sum },
     };
     await this.turnsCol(gameId).doc(turnId).update({

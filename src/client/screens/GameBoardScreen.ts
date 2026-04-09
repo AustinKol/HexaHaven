@@ -1,11 +1,12 @@
 import { playBuildPlacementSound, playDiceRollSound } from '../audio/buildSounds';
 import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledBoardMusicVolume } from '../audio/musicVolume';
 import { ClientEnv } from '../config/env';
+import { BUILD_COSTS } from '../../shared/buildRules';
 import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings } from '../settings/gameSettings';
 import { ScreenId } from '../../shared/constants/screenIds';
-import type { DiceRoll, GamePhase, GameState, ResourceBundle, StructureState, VertexLocation } from '../../shared/types/domain';
-import { bankTrade, connectSocket, endTurn, rollDice, sendChatMessage, syncGameState } from '../networking/socketClient';
-import { clientState, setClientState, subscribeClientState } from '../state/clientState';
+import type { DiceRoll, GamePhase, GameState, ResourceBundle } from '../../shared/types/domain';
+import { bankTrade, buildStructure, connectSocket, disconnectSocket, endTurn, hydrateSession, rollDice, sendChatMessage } from '../networking/socketClient';
+import { clientState, resetClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
 import { createDiceHud, type DiceHud } from '../ui/diceRollDisplay';
 import { TestMapGenScreen, type MapPointerHit } from './TestMapGenScreen';
@@ -122,37 +123,27 @@ function inventoryCount(n: unknown): number {
   return Math.max(0, Math.floor(v));
 }
 
-function cloneGameState(gs: GameState): GameState {
-  return JSON.parse(JSON.stringify(gs)) as GameState;
-}
-
-type BuildKind = 'ROAD' | 'SETTLEMENT' | 'CITY' | 'DEV_CARD';
+type BuildKind = 'ROAD' | 'SETTLEMENT' | 'CITY';
 
 /** Costs (paid from inventory when you can afford): Road 1E+1St · Settlement 1E+1Bl+1St · City 3St+2Bl · Dev 2Cr+2Go */
 const BUILD_OPTIONS: { kind: BuildKind; label: string; cost: ResourceBundle; iconSrc?: string }[] = [
   {
     kind: 'ROAD',
     label: 'Road',
-    cost: { CRYSTAL: 0, STONE: 1, BLOOM: 0, EMBER: 1, GOLD: 0 },
+    cost: BUILD_COSTS.ROAD,
     iconSrc: '/images/buildings/road.png',
   },
   {
     kind: 'SETTLEMENT',
     label: 'Settlement',
-    cost: { CRYSTAL: 0, STONE: 1, BLOOM: 1, EMBER: 1, GOLD: 0 },
+    cost: BUILD_COSTS.SETTLEMENT,
     iconSrc: '/images/buildings/settlement.png',
   },
   {
     kind: 'CITY',
     label: 'City',
-    cost: { CRYSTAL: 0, STONE: 3, BLOOM: 2, EMBER: 0, GOLD: 0 },
+    cost: BUILD_COSTS.CITY,
     iconSrc: '/images/buildings/city.png',
-  },
-  {
-    kind: 'DEV_CARD',
-    label: 'Dev Card',
-    cost: { CRYSTAL: 2, STONE: 0, BLOOM: 0, EMBER: 0, GOLD: 2 },
-    iconSrc: '/images/buildings/dev-card.png',
   },
 ];
 
@@ -250,6 +241,7 @@ export class GameBoardScreen {
     this.livePlayerId = session?.playerId ?? null;
 
     const gameState = this.liveGameState ?? clientState.gameState;
+    const boardTiles = gameState ? Object.values(gameState.board.tilesById) : [];
     const structures = gameState ? Object.values(gameState.board.structuresById) : [];
     const pendingKind =
       this.pendingBuild?.kind === 'SETTLEMENT'
@@ -270,15 +262,16 @@ export class GameBoardScreen {
       enableBackgroundMusic: false,
       showRegenerateButton: false,
       allowPointerRegenerate: false,
-      mapSeed: roomId ?? undefined,
+      mapSeed: gameState?.config.mapSeed ?? roomId ?? undefined,
       compactFit: true,
       reservedBottomPx: GAME_BOARD_BOTTOM_BAR_PX,
       mapLiftPx: GAME_BOARD_MAP_LIFT_PX,
       onMapPointerDown: (hit) => this.handleMapPlaceClick(hit),
       pendingBuildKind: pendingKind,
+      boardTiles,
       roadHoverColor,
       structures: structures.map(s => ({
-        type: s.type === 'GARDEN' ? 'CITY' : (s.type as 'SETTLEMENT' | 'ROAD'),
+        type: s.type as 'SETTLEMENT' | 'CITY' | 'ROAD',
         ownerColor: s.ownerColor,
         vertex: s.vertex,
         edge: s.edge,
@@ -300,6 +293,9 @@ export class GameBoardScreen {
     this.mountResourceBar(this.buttonContainer);
     if (roomId) {
       connectSocket({ gameId: roomId, playerId: session?.playerId });
+      void hydrateSession(roomId).catch((error) => {
+        console.error('Failed to hydrate game session:', error);
+      });
       this.unsubscribe = subscribeClientState((state) => {
         console.log('[GameBoardScreen] Client state updated. Chat messages count:', state.gameState?.chatMessages?.length);
         this.liveGameState = state.gameState;
@@ -359,7 +355,9 @@ export class GameBoardScreen {
     this.exitButton.style.borderRadius = '8px';
     this.exitButton.style.cursor = 'pointer';
     this.exitButton.addEventListener('click', () => {
+      disconnectSocket();
       clearLobbySession();
+      resetClientState();
       navigateTo(ScreenId.MainMenu);
     });
     topRight.appendChild(this.settingsButton);
@@ -1093,84 +1091,6 @@ export class GameBoardScreen {
     this.updateMapDisplay();
   }
 
-  private isVertexOccupied(gs: GameState, vertexId: string): boolean {
-    return Object.values(gs.board.structuresById).some(
-      (s) => s.locationType === 'VERTEX' && s.vertex?.id === vertexId,
-    );
-  }
-
-  private createSettlementStructure(
-    gs: GameState,
-    playerId: string,
-    cost: ResourceBundle,
-    vertex: VertexLocation,
-  ): StructureState {
-    const owner = gs.playersById[playerId];
-    const structureId = `settlement:${playerId}:${vertex.id}`;
-    return {
-      structureId,
-      ownerPlayerId: playerId,
-      ownerName: owner?.displayName ?? playerId,
-      ownerColor: owner?.color ?? '#ffffff',
-      type: 'SETTLEMENT',
-      level: 1,
-      locationType: 'VERTEX',
-      vertex,
-      edge: null,
-      adjacentStructures: [],
-      adjacentTiles: vertex.adjacentHexes.map((h) => `${h.q},${h.r}`),
-      builtAtTurn: gs.turn.currentTurn,
-      builtAt: new Date().toISOString(),
-      cost,
-      roadPath: null,
-    };
-  }
-
-  private createRoadStructure(
-    gs: GameState,
-    playerId: string,
-    cost: ResourceBundle,
-    edgeId: string,
-  ): StructureState {
-    const owner = gs.playersById[playerId];
-    // Parse edge ID: format is "e:q,r,dir"
-    const edgeParts = edgeId.substring(2).split(',');
-    const q = parseInt(edgeParts[0], 10);
-    const r = parseInt(edgeParts[1], 10);
-    const dir = parseInt(edgeParts[2], 10);
-
-    // Hex neighbor directions (axial coordinates top-flat clockwise from bottom-right slant)
-    const HEX_DIRS: [number, number][] = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
-    
-    // Calculate adjacent hexes for this edge (the two hexes that share this edge)
-    const hex1 = { q, r };
-    const [dq, dr] = HEX_DIRS[dir];
-    const hex2 = { q: q + dq, r: r + dr };
-    
-    return {
-      structureId: `road:${playerId}:${edgeId}`,
-      ownerPlayerId: playerId,
-      ownerName: owner?.displayName ?? playerId,
-      ownerColor: owner?.color ?? '#ffffff',
-      type: 'ROAD',
-      level: 1,
-      locationType: 'EDGE',
-      vertex: null,
-      edge: {
-        id: edgeId,
-        hex: hex1,
-        dir,
-        adjacentHexes: [hex1, hex2],
-      },
-      adjacentStructures: [],
-      adjacentTiles: [],
-      builtAtTurn: gs.turn.currentTurn,
-      builtAt: new Date().toISOString(),
-      cost,
-      roadPath: null,
-    };
-  }
-
   private handleMapPlaceClick(hit: MapPointerHit): void {
     console.log('[Settlement] Map click:', hit);
     if (!this.pendingBuild) {
@@ -1178,9 +1098,6 @@ export class GameBoardScreen {
       return;
     }
     const { kind, cost } = this.pendingBuild;
-    if (kind === 'DEV_CARD') {
-      return;
-    }
     const gs = this.liveGameState ?? clientState.gameState;
     const pid = this.livePlayerId;
     if (!gs || !pid) {
@@ -1194,183 +1111,44 @@ export class GameBoardScreen {
       return;
     }
 
-    let selectedVertex: VertexLocation | null = null;
-    let selectedEdgeId: string | null = null;
+    const roomId = getLobbySession()?.roomId ?? null;
+    if (!roomId) {
+      return;
+    }
 
-    if (kind === 'SETTLEMENT') {
-      selectedVertex = hit.vertex;
-      console.log('[Settlement] Checking vertex:', { vertex: selectedVertex, occupied: selectedVertex ? this.isVertexOccupied(gs, selectedVertex.id) : 'N/A' });
-      if (!selectedVertex || this.isVertexOccupied(gs, selectedVertex.id)) {
-        console.log('[Settlement] Vertex blocked or missing');
+    if (kind === 'SETTLEMENT' || kind === 'CITY') {
+      if (!hit.vertex) {
         return;
       }
-    } else if (kind === 'CITY') {
-      selectedVertex = hit.vertex;
-      if (!selectedVertex) {
-        console.log('[City] Vertex missing');
-        return;
-      }
-      const existing = Object.values(gs.board.structuresById).find(
-        (s) => s.type === 'SETTLEMENT' && s.vertex?.id === selectedVertex!.id
-      );
-      if (!existing || existing.ownerPlayerId !== pid) {
-        console.log('[City] Must upgrade from an existing settlement you own');
-        return;
-      }
-    } else if (kind === 'ROAD') {
-      if (!hit.edge) {
-        console.log('[Road] No edge hit');
-        return;
-      }
-      selectedEdgeId = hit.edge.id;
-      const canPlaceRoad = this.canPlaceRoad(gs, pid, hit.edge);
-      console.log('[Road] Checking edge:', { edge: selectedEdgeId, canPlace: canPlaceRoad });
-      if (!canPlaceRoad) {
-        console.log('[Road] Edge cannot connect to settlement or road');
-        return;
-      }
+      this.pendingBuild = null;
+      this.dismissBuildRecipePopover();
+      void buildStructure({
+        gameId: roomId,
+        kind,
+        vertexId: hit.vertex.id,
+      }).then(() => {
+        playBuildPlacementSound(kind);
+      }).catch((error) => {
+        console.error('Structure build failed:', error);
+      });
+      return;
+    }
+
+    if (!hit.edge) {
+      return;
     }
 
     this.pendingBuild = null;
-    console.log('[Settlement] Proceeding with placement');
-    this.applyBuildPurchase(kind, cost, selectedVertex, selectedEdgeId);
-  }
-
-  private canPlaceRoad(gs: GameState, playerId: string, edge: any): boolean {
-    const playerStructures = Object.values(gs.board.structuresById).filter(
-      (s) => s.ownerPlayerId === playerId,
-    );
-
-    // Get the two vertices at the endpoints of this edge
-    const vertexIds = edge.vertices.map((v: any) => v.id);
-    const vertexHits = edge.vertices; // Each has {id, hex, corner}
-
-    // Check if either endpoint has a player settlement or city
-    for (const vId of vertexIds) {
-      if (playerStructures.some((s) => s.locationType === 'VERTEX' && s.vertex?.id === vId)) {
-        return true;
-      }
-    }
-
-    // Check if any player roads connect to either endpoint
-    const playerRoads = playerStructures.filter((s) => s.type === 'ROAD' && s.edge);
-    const HEX_DIRS: [number, number][] = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
-
-    for (const road of playerRoads) {
-      if (!road.edge) continue;
-      const { hex: roadHex, dir: roadDir } = road.edge;
-
-      // Check each endpoint of the new road
-      for (const vhit of vertexHits) {
-        const { hex: vHex, corner: vCorner } = vhit;
-
-        // Check if road is in the same hex and touches this endpoint corner
-        if (roadHex.q === vHex.q && roadHex.r === vHex.r) {
-          const roadCorner1 = roadDir;
-          const roadCorner2 = (roadDir + 1) % 6;
-          if (roadCorner1 === vCorner || roadCorner2 === vCorner) {
-            return true;
-          }
-        }
-
-        // Check if road's adjacent hex contains this vertex
-        const [dq, dr] = HEX_DIRS[roadDir];
-        const roadAdjHex = { q: roadHex.q + dq, r: roadHex.r + dr };
-        if ((roadAdjHex.q === vHex.q && roadAdjHex.r === vHex.r)) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  }
-
-  private applyBuildPurchase(kind: BuildKind, cost: ResourceBundle, selectedVertex: VertexLocation | null = null, selectedEdgeId: string | null = null): void {
     this.dismissBuildRecipePopover();
-    const gs = this.liveGameState ?? clientState.gameState;
-    const pid = this.livePlayerId;
-    if (!gs || !pid) {
-      return;
-    }
-    const p0 = gs.playersById[pid];
-    if (!p0 || !canAffordCost(p0.resources, cost)) {
-      return;
-    }
-    const next = cloneGameState(gs);
-    const p = next.playersById[pid];
-    if (!p) {
-      return;
-    }
-
-    let placed = false;
-    if (kind === 'SETTLEMENT' && selectedVertex) {
-      if (this.isVertexOccupied(next, selectedVertex.id)) {
-        return;
-      }
-      const settlement = this.createSettlementStructure(next, pid, cost, selectedVertex);
-      next.board.structuresById[settlement.structureId] = settlement;
-      p.stats.settlementsBuilt = (p.stats.settlementsBuilt ?? 0) + 1;
-      p.stats.publicVP = (p.stats.publicVP ?? 0) + 1;
-      placed = true;
-    } else if (kind === 'CITY' && selectedVertex) {
-      const existingKey = Object.keys(next.board.structuresById).find(
-        (key) => {
-          const s = next.board.structuresById[key];
-          return s.type === 'SETTLEMENT' && s.vertex?.id === selectedVertex.id && s.ownerPlayerId === pid;
-        }
-      );
-      if (!existingKey) {
-        return;
-      }
-      const existing = next.board.structuresById[existingKey];
-      existing.type = 'GARDEN';
-      p.stats.citiesBuilt = (p.stats.citiesBuilt ?? 0) + 1;
-      p.stats.publicVP = (p.stats.publicVP ?? 0) + 1; // +1 VP existing settlement = 2 VP total
-      placed = true;
-    } else if (kind === 'ROAD' && selectedEdgeId) {
-      const roadExists = Object.values(next.board.structuresById).some(
-        (s) => s.locationType === 'EDGE' && s.edge?.id === selectedEdgeId,
-      );
-      if (roadExists) {
-        return;
-      }
-      const road = this.createRoadStructure(next, pid, cost, selectedEdgeId);
-      next.board.structuresById[road.structureId] = road;
-      p.stats.roadsBuilt = (p.stats.roadsBuilt ?? 0) + 1;
-      placed = true;
-    }
-
-    if (!placed) {
-      return;
-    }
-
-    if (!ClientEnv.devUnlimitedMaterials) {
-      for (const k of RESOURCE_KEYS) {
-        if (inventoryCount(p.resources[k]) < inventoryCount(cost[k])) {
-          return;
-        }
-      }
-      for (const k of RESOURCE_KEYS) {
-        p.resources[k] = inventoryCount(p.resources[k]) - inventoryCount(cost[k]);
-      }
-    }
-
-    if (kind === 'ROAD' || kind === 'SETTLEMENT' || kind === 'CITY') {
+    void buildStructure({
+      gameId: roomId,
+      kind,
+      edgeId: hit.edge.id,
+    }).then(() => {
       playBuildPlacementSound(kind);
-    }
-
-    p.updatedAt = new Date().toISOString();
-    this.resourceSelection = emptyResourceBundle();
-    setClientState({ gameState: next });
-    this.liveGameState = next;
-    
-    // Force synchronize with server to bypass the frozen Demo 1 scope
-    const roomId = getLobbySession()?.roomId ?? null;
-    if (roomId) {
-      void syncGameState(roomId, next);
-    }
-
-    this.refreshPlayerUi();
+    }).catch((error) => {
+      console.error('Structure build failed:', error);
+    });
   }
 
   private updateMapDisplay(): void {
@@ -1392,7 +1170,7 @@ export class GameBoardScreen {
       scene.updateMap(
         pendingBuildKind,
         structures.map(s => ({
-          type: s.type === 'GARDEN' ? 'CITY' : (s.type as 'SETTLEMENT' | 'ROAD'),
+          type: s.type as 'SETTLEMENT' | 'CITY' | 'ROAD',
           ownerColor: s.ownerColor,
           vertex: s.vertex,
           edge: s.edge,
