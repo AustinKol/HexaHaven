@@ -19,6 +19,7 @@ export const CLIENT_EVENTS = {
   END_TURN: 'END_TURN',
   SEND_CHAT_MESSAGE: 'SEND_CHAT_MESSAGE',
   SYNC_GAME_STATE: 'SYNC_GAME_STATE',
+  BANK_TRADE: 'BANK_TRADE',
 } as const;
 
 /** Server -> Client application events. */
