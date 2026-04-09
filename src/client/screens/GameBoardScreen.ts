@@ -363,30 +363,25 @@ export class GameBoardScreen {
       navigateTo(ScreenId.MainMenu);
     });
     topRight.appendChild(this.settingsButton);
-    topRight.appendChild(this.exitButton);
-    this.topRightContainer = topRight;
-    this.buttonContainer.appendChild(topRight);
-
     this.musicToggleButton = document.createElement('button');
     this.musicToggleButton.type = 'button';
-    this.musicToggleButton.style.position = 'absolute';
-    /** Sits on the bottom bar: overlap ~half the button with the bar; +38px total lift (incl. ~0.2cm @ 96dpi). */
-    this.musicToggleButton.style.bottom = `${Math.max(12, GAME_BOARD_BOTTOM_BAR_PX - 32 + 38)}px`;
-    this.musicToggleButton.style.right = '16px';
-    this.musicToggleButton.style.zIndex = '10';
     this.musicToggleButton.style.display = 'flex';
     this.musicToggleButton.style.alignItems = 'center';
     this.musicToggleButton.style.justifyContent = 'center';
-    this.musicToggleButton.style.width = '44px';
-    this.musicToggleButton.style.height = '44px';
+    this.musicToggleButton.style.width = '40px';
+    this.musicToggleButton.style.height = '40px';
+    this.musicToggleButton.style.padding = '0';
     this.musicToggleButton.style.color = '#ffffff';
     this.musicToggleButton.style.background = 'rgba(15, 23, 42, 0.85)';
     this.musicToggleButton.style.border = '1px solid rgba(255, 255, 255, 0.35)';
-    this.musicToggleButton.style.borderRadius = '9999px';
+    this.musicToggleButton.style.borderRadius = '8px';
     this.musicToggleButton.style.cursor = 'pointer';
     this.musicToggleButton.addEventListener('click', () => this.toggleMusic());
     this.updateMusicButtonIcon();
-    this.buttonContainer.appendChild(this.musicToggleButton);
+    topRight.appendChild(this.musicToggleButton);
+    topRight.appendChild(this.exitButton);
+    this.topRightContainer = topRight;
+    this.buttonContainer.appendChild(topRight);
   }
 
   private mountPlayerPanel(parent: HTMLElement): void {
@@ -394,7 +389,7 @@ export class GameBoardScreen {
       this.playerPanel.remove();
     }
     const panel = document.createElement('div');
-    panel.className = 'absolute top-16 left-4 flex flex-col gap-2';
+    panel.className = 'absolute top-4 left-4 flex flex-col gap-2';
     panel.style.zIndex = '3';
     panel.style.width = '128px';
     this.playerPanel = panel;
@@ -451,15 +446,15 @@ export class GameBoardScreen {
     this.bankReceiveButtons = {};
 
     const panel = document.createElement('div');
-    panel.className = 'absolute top-16 right-4 rounded-xl border border-slate-600 bg-slate-900/88 px-4 py-3 text-white shadow-md';
+    panel.className = 'absolute top-16 right-4 rounded-xl border border-slate-600 bg-slate-900/88 px-3 py-2 text-white shadow-md';
     panel.style.zIndex = '3';
-    panel.style.width = '250px';
+    panel.style.width = '260px';
 
     const header = document.createElement('div');
     header.className = 'mb-2 flex items-center justify-between gap-2';
 
     const title = document.createElement('div');
-    title.className = 'font-hexahaven-ui text-sm font-semibold';
+    title.className = 'font-hexahaven-ui text-xs font-semibold';
     title.textContent = 'Turn HUD (DEMO)';
     header.appendChild(title);
 
@@ -473,18 +468,18 @@ export class GameBoardScreen {
     }
 
     const currentPlayerLabel = document.createElement('div');
-    currentPlayerLabel.className = 'font-hexahaven-ui text-xs text-slate-300';
+    currentPlayerLabel.className = 'font-hexahaven-ui text-[10px] text-slate-300';
     currentPlayerLabel.textContent = 'Current Player';
 
     const currentPlayerValue = document.createElement('div');
-    currentPlayerValue.className = 'font-hexahaven-ui text-sm font-semibold mb-2';
+    currentPlayerValue.className = 'font-hexahaven-ui text-xs font-semibold mb-1.5';
 
     const currentPhaseLabel = document.createElement('div');
-    currentPhaseLabel.className = 'font-hexahaven-ui text-xs text-slate-300';
+    currentPhaseLabel.className = 'font-hexahaven-ui text-[10px] text-slate-300';
     currentPhaseLabel.textContent = 'Current Phase';
 
     const currentPhaseValue = document.createElement('div');
-    currentPhaseValue.className = 'font-hexahaven-ui text-sm font-semibold mb-2';
+    currentPhaseValue.className = 'font-hexahaven-ui text-xs font-semibold mb-1.5';
 
     const diceHud = createDiceHud();
     diceHud.root.style.marginBottom = '0';
@@ -511,12 +506,12 @@ export class GameBoardScreen {
     dicePanel.appendChild(rollDiceButton);
 
     const actions = document.createElement('div');
-    actions.className = 'flex flex-col gap-2';
+    actions.className = 'flex flex-col gap-1.5';
 
     const endTurnButton = document.createElement('button');
     endTurnButton.type = 'button';
     endTurnButton.className =
-      'font-hexahaven-ui rounded-md border border-emerald-400/60 bg-emerald-900/60 px-2 py-2 text-xs font-semibold';
+      'font-hexahaven-ui rounded-md border border-emerald-400/60 bg-emerald-900/60 px-2 py-1.5 text-[11px] font-semibold';
     endTurnButton.textContent = 'End Turn';
     endTurnButton.addEventListener('click', () => this.handleEndTurnClick());
 
@@ -651,11 +646,16 @@ export class GameBoardScreen {
 
     const panel = document.createElement('div');
     panel.className = 'absolute right-4 flex flex-col bg-slate-900/88 border border-slate-700 rounded-lg shadow-lg overflow-hidden pointer-events-auto';
-    panel.style.bottom = `${GAME_BOARD_BOTTOM_BAR_PX + 60}px`; // Positioned higher to clear the music toggle
+    panel.style.bottom = `${GAME_BOARD_BOTTOM_BAR_PX + 10}px`;
     panel.style.width = '260px';
-    panel.style.height = '200px';
+    panel.style.height = '160px';
     panel.style.zIndex = '100'; // Temporarily increase z-index to rule out layering issues
     this.chatPanel = panel;
+    requestAnimationFrame(() => {
+      if (this.chatPanel && this.diceHudPanel) {
+        this.chatPanel.style.height = `${this.diceHudPanel.offsetHeight}px`;
+      }
+    });
 
     const messagesContainer = document.createElement('div');
     messagesContainer.className = 'flex-1 overflow-y-auto p-2 text-xs text-white font-hexahaven-ui';
