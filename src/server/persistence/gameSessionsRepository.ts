@@ -10,7 +10,7 @@ export interface GameSessionDoc {
   status: RoomStatus;
   config: GameConfig;
   playerOrder: string[];
-  chatMessages: ChatMessage[];
+  chatMessages?: ChatMessage[];
   /** playerId → PlayerStats map stored at the top level for quick score reads. */
   playerStats: Record<string, { publicVP: number; settlementsBuilt: number; roadsBuilt: number; totalResourcesCollected: number; totalResourcesSpent: number; longestRoadLength: number; turnsPlayed: number }>;
   winnerPlayerId: string | null;
@@ -49,6 +49,10 @@ export class GameSessionsRepository extends FirestoreRepository {
     return this.collection().doc(gameId);
   }
 
+  private chatCol(gameId: string) {
+    return this.db.collection(`games/${gameId}/chat`);
+  }
+
   /**
    * Creates a new game document.
    * gameId is used as both the Firestore document ID and the readable room code.
@@ -61,7 +65,6 @@ export class GameSessionsRepository extends FirestoreRepository {
       status: 'waiting',
       config: params.config,
       playerOrder: [],
-      chatMessages: [],
       playerStats: {},
       winnerPlayerId: null,
       createdBy: params.createdBy,
@@ -141,10 +144,17 @@ export class GameSessionsRepository extends FirestoreRepository {
   }
 
   async appendChatMessage(gameId: string, chatMessage: ChatMessage): Promise<void> {
-    await this.doc(gameId).update({
-      chatMessages: FieldValue.arrayUnion(chatMessage),
+    const batch = this.db.batch();
+    batch.set(this.chatCol(gameId).doc(chatMessage.id), chatMessage);
+    batch.update(this.doc(gameId), {
       updatedAt: FieldValue.serverTimestamp(),
     });
+    await batch.commit();
+  }
+
+  async getChatMessages(gameId: string): Promise<ChatMessage[]> {
+    const snap = await this.chatCol(gameId).orderBy('timestamp', 'asc').get();
+    return snap.docs.map((doc) => doc.data() as ChatMessage);
   }
 
   /** Sets the winner and marks the game as finished. Uses a transaction to prevent duplicate writes. */

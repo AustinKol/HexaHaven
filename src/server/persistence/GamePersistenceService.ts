@@ -62,6 +62,20 @@ function nowISO(): string {
   return new Date().toISOString();
 }
 
+function mergeChatMessages(...messageGroups: Array<ChatMessage[] | undefined>): ChatMessage[] {
+  const messagesById = new Map<string, ChatMessage>();
+
+  for (const messages of messageGroups) {
+    for (const message of messages ?? []) {
+      messagesById.set(message.id, message);
+    }
+  }
+
+  return Array.from(messagesById.values()).sort((left, right) => (
+    left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id)
+  ));
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export class GamePersistenceService {
@@ -667,10 +681,11 @@ export class GamePersistenceService {
     const gameId = gameDoc.gameId;
 
     // Fetch all subcollections in parallel
-    const [players, tilesById, structuresById] = await Promise.all([
+    const [players, tilesById, structuresById, chatMessages] = await Promise.all([
       playersRepository.getPlayers(gameId),
       boardRepository.getTiles(gameId),
       boardRepository.getStructures(gameId),
+      gameSessionsRepository.getChatMessages(gameId),
     ]);
 
     // Build playersById map
@@ -719,7 +734,7 @@ export class GamePersistenceService {
         turnEndsAt: toISO(gameDoc.turnEndsAt),
         lastDiceRoll,
       },
-      chatMessages: gameDoc.chatMessages ?? [],
+      chatMessages: mergeChatMessages(gameDoc.chatMessages, chatMessages),
     };
 
     // Cache the loaded state
