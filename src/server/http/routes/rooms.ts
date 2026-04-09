@@ -136,6 +136,7 @@ function buildInitialGameStateFromRoom(room: Room): GameState {
       turnEndsAt: null,
       lastDiceRoll: null,
     },
+    chatMessages: [],
   };
 }
 

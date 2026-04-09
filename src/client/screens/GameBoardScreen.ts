@@ -1,7 +1,7 @@
 import { playBuildPlacementSound, playDiceRollSound } from '../audio/buildSounds';
 import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledBoardMusicVolume } from '../audio/musicVolume';
 import { ClientEnv } from '../config/env';
-import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings, TEXT_SPEEDS } from '../settings/gameSettings';
+import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings } from '../settings/gameSettings';
 import { ScreenId } from '../../shared/constants/screenIds';
 import type { DiceRoll, GamePhase, GameState, ResourceBundle, StructureState, VertexLocation } from '../../shared/types/domain';
 import { bankTrade, connectSocket, endTurn, rollDice, sendChatMessage, syncGameState } from '../networking/socketClient';

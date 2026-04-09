@@ -333,6 +333,7 @@ async function loadLatestGameStateSnapshot(roomCodeOrGameId: string): Promise<Ga
             }
           : null,
       },
+      chatMessages: [],
     };
 
     roomManager.setHydratedGameState(gameState);
@@ -831,22 +832,6 @@ export function registerSocketHandlers(
       socket.join(gameId);
       // Returns/broadcasts the latest authoritative snapshot for refresh recovery.
       completeAction(io, gameId, gameState, ack);
-      const incomingState = (request as any).gameState;
-      const updatedGameState: GameState = {
-        ...incomingState,
-        chatMessages: gameState.chatMessages,
-        updatedAt: new Date().toISOString(),
-      };
-
-      if (!roomManager.setGameState(gameId, updatedGameState)) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Unable to store game state for SYNC_GAME_STATE.',
-        });
-        return;
-      }
-
-      completeAction(io, gameId, updatedGameState, ack);
     });
 
     socket.on(SocketEvents.Disconnect, () => {
@@ -877,7 +862,7 @@ export function registerSocketHandlers(
         }
 
         const gameState = roomManager.getGameState(gameId);
-        logger.debug(`[Chat] Game state retrieved for game ${gameId}. Current messages: ${gameState?.chatMessages?.length ?? 0}`);
+        logger.info(`[Chat] Game state retrieved for game ${gameId}. Current messages: ${gameState?.chatMessages?.length ?? 0}`);
         if (!gameState) {
           rejectAction(socket, ack, { code: 'SESSION_NOT_FOUND', message: 'Game session not found.' });
           return;
