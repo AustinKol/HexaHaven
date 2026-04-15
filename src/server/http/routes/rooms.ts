@@ -81,7 +81,7 @@ function buildInitialGameStateFromRoom(room: Room): GameState {
       goalCount: 0,
       winRule: 'ALL_GOALS_COMPLETE',
       mapSeed: 0,
-      mapSize: 'small',
+      mapSize: 'medium',
       timerEnabled: false,
       turnTimeSec: null,
       allowReroll: false,
