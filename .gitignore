@@ -164,3 +164,4 @@ serverless.yml
 *.crt
 *firebase-adminsdk*.json
 
+hexahaven-dev-service-account.json
