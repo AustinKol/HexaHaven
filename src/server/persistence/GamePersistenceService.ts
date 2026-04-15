@@ -45,6 +45,7 @@ const DEFAULT_STATS: PlayerStats = {
 };
 
 const RESOURCE_TYPES: ResourceType[] = ['CRYSTAL', 'STONE', 'BLOOM', 'EMBER', 'GOLD'];
+const FIXED_TURN_TIME_SEC = 30;
 
 function nowISO(): string {
   return new Date().toISOString();
@@ -267,6 +268,23 @@ function buildResourceCollection(gameState: GameState, sum: number): Map<string,
 }
 
 export class GamePersistenceService {
+  private computeTurnEndsAtIso(fromMs: number = Date.now()): string {
+    return new Date(fromMs + (FIXED_TURN_TIME_SEC * 1000)).toISOString();
+  }
+
+  private buildNextTurnState(gameState: GameState, nextPlayerIndex: number, startedAtIso: string): TurnState {
+    const nextPlayerId = gameState.playerOrder[nextPlayerIndex];
+    return {
+      currentTurn: gameState.turn.currentTurn + 1,
+      currentPlayerId: nextPlayerId,
+      currentPlayerIndex: nextPlayerIndex,
+      phase: 'ROLL',
+      turnStartedAt: startedAtIso,
+      turnEndsAt: this.computeTurnEndsAtIso(new Date(startedAtIso).getTime()),
+      lastDiceRoll: null,
+    };
+  }
+
   private async generateUniqueRoomCode(): Promise<string> {
     for (let attempt = 0; attempt < 50; attempt += 1) {
       const roomCode = generateRoomCode();
@@ -392,9 +410,7 @@ export class GamePersistenceService {
       currentPlayerIndex: 0,
       phase: 'ROLL',
       turnStartedAt: now,
-      turnEndsAt: gameState.config.timerEnabled && gameState.config.turnTimeSec
-        ? new Date(Date.now() + gameState.config.turnTimeSec * 1000).toISOString()
-        : null,
+      turnEndsAt: this.computeTurnEndsAtIso(),
       lastDiceRoll: null,
     };
 
@@ -727,17 +743,7 @@ export class GamePersistenceService {
       turnsPlayed: gameState.playersById[playerId].stats.turnsPlayed + 1,
     });
 
-    const nextTurn: TurnState = {
-      currentTurn: currentTurnNum + 1,
-      currentPlayerId: nextPlayerId,
-      currentPlayerIndex: nextIndex,
-      phase: 'ROLL',
-      turnStartedAt: now,
-      turnEndsAt: gameState.config.timerEnabled && gameState.config.turnTimeSec
-        ? new Date(Date.now() + gameState.config.turnTimeSec * 1000).toISOString()
-        : null,
-      lastDiceRoll: null,
-    };
+    const nextTurn = this.buildNextTurnState(gameState, nextIndex, now);
 
     await turnsRepository.createTurn(gameId, {
       turnId: 'turn_' + nextTurn.currentTurn,
@@ -833,6 +839,64 @@ export class GamePersistenceService {
     }
 
     return null;
+  }
+
+  async advanceTurnIfExpired(gameId: string): Promise<GameState | null> {
+    const gameState = await this.loadRequiredGame(gameId);
+    if (gameState.roomStatus !== 'in_progress') {
+      return null;
+    }
+    if (!gameState.turn.turnEndsAt) {
+      return null;
+    }
+
+    const turnEndsAtMs = new Date(gameState.turn.turnEndsAt).getTime();
+    if (!Number.isFinite(turnEndsAtMs) || Date.now() < turnEndsAtMs) {
+      return null;
+    }
+
+    const currentPlayerId = gameState.turn.currentPlayerId;
+    const currentIndex = gameState.turn.currentPlayerIndex ?? -1;
+    if (!currentPlayerId || gameState.playerOrder.length === 0) {
+      return null;
+    }
+
+    const nextIndex = (currentIndex + 1) % gameState.playerOrder.length;
+    const nextPlayerId = gameState.playerOrder[nextIndex];
+    const nextPlayer = gameState.playersById[nextPlayerId];
+    if (!nextPlayer) {
+      throw new Error('Next player not found');
+    }
+
+    const startedAt = gameState.turn.turnStartedAt
+      ? new Date(gameState.turn.turnStartedAt).getTime()
+      : Date.now();
+    const durationSec = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+    const currentTurnNum = gameState.turn.currentTurn;
+    const turnId = 'turn_' + currentTurnNum;
+    const now = nowISO();
+    const endedPlayer = gameState.playersById[currentPlayerId];
+
+    await turnsRepository.completeTurn(gameId, turnId, durationSec);
+    if (endedPlayer) {
+      await playersRepository.updateStats(gameId, currentPlayerId, {
+        ...endedPlayer.stats,
+        turnsPlayed: endedPlayer.stats.turnsPlayed + 1,
+      });
+    }
+
+    const nextTurn = this.buildNextTurnState(gameState, nextIndex, now);
+    await turnsRepository.createTurn(gameId, {
+      turnId: 'turn_' + nextTurn.currentTurn,
+      turnNumber: nextTurn.currentTurn,
+      playerId: nextPlayerId,
+      playerName: nextPlayer.displayName,
+    });
+    await gameSessionsRepository.updateTurnState(gameId, nextTurn);
+
+    const updatedGameState = await this.loadRequiredGame(gameId);
+    logger.info('Turn ' + currentTurnNum + ' timed out. Turn ' + nextTurn.currentTurn + ': ' + nextPlayer.displayName);
+    return updatedGameState;
   }
 
   async loadGame(identifier: string): Promise<GameState | null> {

@@ -34,6 +34,7 @@ interface SocketSession {
 }
 
 const socketPlayerMap = new Map<string, SocketSession>();
+const activeGameIds = new Set<string>();
 
 function normalizeId(rawValue: unknown): string | null {
   if (typeof rawValue === 'string') {
@@ -217,6 +218,7 @@ function rememberSocketSession(
 
   socket.join(gameState.gameId);
   socketPlayerMap.set(socket.id, session);
+  activeGameIds.add(gameState.gameId);
 
   const socketData = socket.data as Record<string, unknown>;
   socketData.gameId = gameState.gameId;
@@ -283,6 +285,28 @@ async function restoreSocketSessionFromHandshake(socket: TypedSocket): Promise<v
 }
 
 export function registerSocketHandlers(io: TypedServer): void {
+  let timeoutPollInFlight = false;
+  setInterval(() => {
+    if (timeoutPollInFlight || activeGameIds.size === 0) {
+      return;
+    }
+    timeoutPollInFlight = true;
+    void (async () => {
+      try {
+        for (const gameId of activeGameIds) {
+          const updatedGameState = await gamePersistenceService.advanceTurnIfExpired(gameId);
+          if (updatedGameState) {
+            io.to(gameId).emit(SERVER_EVENTS.GAME_STATE_UPDATE, updatedGameState);
+          }
+        }
+      } catch (error) {
+        logger.warn(`Turn timeout poll failed: ${(error as Error).message}`);
+      } finally {
+        timeoutPollInFlight = false;
+      }
+    })();
+  }, 1000);
+
   io.on(SocketEvents.Connection, (socket: TypedSocket) => {
     logger.info(`Client connected: ${socket.id}`);
     void restoreSocketSessionFromHandshake(socket);

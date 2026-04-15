@@ -17,6 +17,8 @@ type ResourceKey = keyof ResourceBundle;
 const GAME_BOARD_BOTTOM_BAR_PX = 84;
 /** ~0.5cm at 96dpi — extra inset so the map sits slightly higher. */
 const GAME_BOARD_MAP_LIFT_PX = 20;
+const FIXED_TURN_TIME_SECONDS = 30;
+const TURN_TIMER_WARNING_SECONDS = 15;
 
 /** Matches map biome feel (see TestMapGenScreen BIOME_PALETTE); tuned for UI legibility. */
 const RESOURCE_BOX_CONFIG: {
@@ -188,6 +190,10 @@ export class GameBoardScreen {
   private diceHudPanel: HTMLDivElement | null = null;
   private currentPlayerValue: HTMLDivElement | null = null;
   private currentPhaseValue: HTMLDivElement | null = null;
+  private turnTimerValue: HTMLDivElement | null = null;
+  private turnTimerTicker: number | null = null;
+  private lastTimerTurnKey: string | null = null;
+  private nearTimeoutTickSecond: number | null = null;
   private diceHud: DiceHud | null = null;
   /** Local roll: waiting for server `lastDiceRoll` after clicking Roll. */
   private expectingLocalDiceAck = false;
@@ -222,6 +228,108 @@ export class GameBoardScreen {
     this.backgroundMusic.volume = scaledBoardMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
     this.syncGameSettingsPanelSliders();
   };
+
+  private resolveTurnEndsAtMs(gameState: GameState | null): number | null {
+    const turnEndsAt = gameState?.turn.turnEndsAt;
+    if (turnEndsAt) {
+      const parsed = Date.parse(turnEndsAt);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    const turnStartedAt = gameState?.turn.turnStartedAt;
+    if (turnStartedAt) {
+      const startedMs = Date.parse(turnStartedAt);
+      if (Number.isFinite(startedMs)) {
+        return startedMs + (FIXED_TURN_TIME_SECONDS * 1000);
+      }
+    }
+    return null;
+  }
+
+  private playNearTimeoutTick(): void {
+    try {
+      const Ctor = window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctor) {
+        return;
+      }
+      const context = new Ctor();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = 'square';
+      oscillator.frequency.value = 880;
+      gain.gain.value = 0.02;
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.09);
+      window.setTimeout(() => {
+        void context.close();
+      }, 150);
+    } catch {
+      // Ignore audio failures caused by browser gesture policy or unavailable API.
+    }
+  }
+
+  private startTurnTimerTicker(): void {
+    if (this.turnTimerTicker !== null) {
+      return;
+    }
+    this.turnTimerTicker = window.setInterval(() => {
+      this.updateTurnTimerUi();
+    }, 250);
+  }
+
+  private stopTurnTimerTicker(): void {
+    if (this.turnTimerTicker !== null) {
+      clearInterval(this.turnTimerTicker);
+      this.turnTimerTicker = null;
+    }
+    this.lastTimerTurnKey = null;
+    this.nearTimeoutTickSecond = null;
+  }
+
+  private updateTurnTimerUi(): void {
+    if (!this.turnTimerValue) {
+      return;
+    }
+    const gameState = this.liveGameState ?? clientState.gameState;
+    const activePlayerId = gameState?.turn.currentPlayerId ?? null;
+    const turnKey = activePlayerId ? `${gameState?.turn.currentTurn ?? 0}:${activePlayerId}` : null;
+    if (turnKey && turnKey !== this.lastTimerTurnKey) {
+      this.lastTimerTurnKey = turnKey;
+      this.nearTimeoutTickSecond = null;
+    }
+
+    const turnEndsAtMs = this.resolveTurnEndsAtMs(gameState);
+    if (!Number.isFinite(turnEndsAtMs)) {
+      this.turnTimerValue.textContent = '--:--';
+      this.turnTimerValue.style.background = 'rgba(15, 23, 42, 0.9)';
+      this.turnTimerValue.style.borderColor = 'rgba(148, 163, 184, 0.65)';
+      this.turnTimerValue.style.color = '#e2e8f0';
+      return;
+    }
+
+    const remainingMs = Math.max(0, (turnEndsAtMs as number) - Date.now());
+    const remainingSec = Math.ceil(remainingMs / 1000);
+    const min = Math.floor(remainingSec / 60);
+    const sec = remainingSec % 60;
+    this.turnTimerValue.textContent = `${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+
+    if (remainingSec <= TURN_TIMER_WARNING_SECONDS) {
+      this.turnTimerValue.style.background = 'rgba(127, 29, 29, 0.92)';
+      this.turnTimerValue.style.borderColor = 'rgba(248, 113, 113, 0.95)';
+      this.turnTimerValue.style.color = '#fee2e2';
+      if (remainingSec > 0 && remainingSec !== this.nearTimeoutTickSecond) {
+        this.nearTimeoutTickSecond = remainingSec;
+        this.playNearTimeoutTick();
+      }
+    } else {
+      this.turnTimerValue.style.background = 'rgba(8, 47, 73, 0.9)';
+      this.turnTimerValue.style.borderColor = 'rgba(34, 211, 238, 0.85)';
+      this.turnTimerValue.style.color = '#cffafe';
+    }
+  }
 
   constructor() {
     this.backgroundMusic.loop = true;
@@ -289,6 +397,7 @@ export class GameBoardScreen {
     }
     this.mountPlayerPanel(this.buttonContainer);
     this.mountTurnHud(this.buttonContainer);
+    this.startTurnTimerTicker();
     this.mountChatPanel(this.buttonContainer);
     this.mountResourceBar(this.buttonContainer);
     if (roomId) {
@@ -479,6 +588,15 @@ export class GameBoardScreen {
     const currentPhaseValue = document.createElement('div');
     currentPhaseValue.className = 'font-hexahaven-ui text-xs font-semibold mb-1.5';
 
+    const turnTimerLabel = document.createElement('div');
+    turnTimerLabel.className = 'font-hexahaven-ui text-[10px] text-cyan-200';
+    turnTimerLabel.textContent = 'Turn Timer';
+
+    const turnTimerValue = document.createElement('div');
+    turnTimerValue.className =
+      'font-hexahaven-ui mb-2 rounded-md border px-2 py-1 text-center text-lg font-bold tracking-widest tabular-nums';
+    turnTimerValue.textContent = '01:00';
+
     const diceHud = createDiceHud();
     diceHud.root.style.marginBottom = '0';
 
@@ -619,12 +737,15 @@ export class GameBoardScreen {
     panel.appendChild(currentPlayerValue);
     panel.appendChild(currentPhaseLabel);
     panel.appendChild(currentPhaseValue);
+    panel.appendChild(turnTimerLabel);
+    panel.appendChild(turnTimerValue);
     panel.appendChild(actions);
 
     this.turnHudPanel = panel;
     this.diceHudPanel = dicePanel;
     this.currentPlayerValue = currentPlayerValue;
     this.currentPhaseValue = currentPhaseValue;
+    this.turnTimerValue = turnTimerValue;
     this.diceHud = diceHud;
     this.rollDiceButton = rollDiceButton;
     this.endTurnButton = endTurnButton;
@@ -635,6 +756,7 @@ export class GameBoardScreen {
 
     this.refreshBankTradeUi();
     this.updateTurnHud();
+    this.updateTurnTimerUi();
   }
 
   private mountChatPanel(parent: HTMLElement): void {
@@ -1242,6 +1364,7 @@ export class GameBoardScreen {
       this.bankTradeButton.style.opacity = this.bankTradeButton.disabled ? '0.55' : '1';
       this.bankTradeButton.style.cursor = this.bankTradeButton.disabled ? 'not-allowed' : 'pointer';
     }
+    this.updateTurnTimerUi();
   }
 
   private asDiceRoll(raw: unknown): DiceRoll | null {
@@ -1704,6 +1827,7 @@ export class GameBoardScreen {
     this.resourceBarLeft = null;
     this.resourceBarRight = null;
     this.cancelLocalDiceRollAnimation();
+    this.stopTurnTimerTicker();
     if (this.diceHudPanel) {
       this.diceHudPanel.remove();
       this.diceHudPanel = null;
@@ -1714,6 +1838,7 @@ export class GameBoardScreen {
     }
     this.currentPlayerValue = null;
     this.currentPhaseValue = null;
+    this.turnTimerValue = null;
     this.diceHud = null;
     this.rollDiceButton = null;
     this.endTurnButton = null;
