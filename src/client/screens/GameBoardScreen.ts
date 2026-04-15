@@ -205,6 +205,8 @@ export class GameBoardScreen {
   private chatPanel: HTMLDivElement | null = null;
   private chatMessagesContainer: HTMLDivElement | null = null;
   private chatInput: HTMLInputElement | null = null;
+  private statusChatLog: { timestampMs: number; text: string }[] = [];
+  private lastStatusLogKey: string | null = null;
   private bankTradeButton: HTMLButtonElement | null = null;
   private endTurnButton: HTMLButtonElement | null = null;
   private bankGiveSelection: ResourceKey = 'EMBER';
@@ -574,20 +576,6 @@ export class GameBoardScreen {
       header.appendChild(devBadge);
     }
 
-    const currentPlayerLabel = document.createElement('div');
-    currentPlayerLabel.className = 'font-hexahaven-ui text-[10px] text-slate-300';
-    currentPlayerLabel.textContent = 'Current Player';
-
-    const currentPlayerValue = document.createElement('div');
-    currentPlayerValue.className = 'font-hexahaven-ui text-xs font-semibold mb-1.5';
-
-    const currentPhaseLabel = document.createElement('div');
-    currentPhaseLabel.className = 'font-hexahaven-ui text-[10px] text-slate-300';
-    currentPhaseLabel.textContent = 'Current Phase';
-
-    const currentPhaseValue = document.createElement('div');
-    currentPhaseValue.className = 'font-hexahaven-ui text-xs font-semibold mb-1.5';
-
     const turnTimerLabel = document.createElement('div');
     turnTimerLabel.className = 'font-hexahaven-ui text-[10px] text-cyan-200';
     turnTimerLabel.textContent = 'Turn Timer';
@@ -725,26 +713,22 @@ export class GameBoardScreen {
       'font-hexahaven-ui rounded-md border border-amber-400/60 bg-amber-900/60 px-2 py-2 text-xs font-semibold';
     bankTradeButton.addEventListener('click', () => this.handleBankTradeClick());
 
-    actions.appendChild(endTurnButton);
     actions.appendChild(bankGiveLabel);
     actions.appendChild(bankGiveRow);
     actions.appendChild(bankReceiveLabel);
     actions.appendChild(bankReceiveRow);
     actions.appendChild(bankTradeButton);
+    actions.appendChild(endTurnButton);
 
     panel.appendChild(header);
-    panel.appendChild(currentPlayerLabel);
-    panel.appendChild(currentPlayerValue);
-    panel.appendChild(currentPhaseLabel);
-    panel.appendChild(currentPhaseValue);
     panel.appendChild(turnTimerLabel);
     panel.appendChild(turnTimerValue);
     panel.appendChild(actions);
 
     this.turnHudPanel = panel;
     this.diceHudPanel = dicePanel;
-    this.currentPlayerValue = currentPlayerValue;
-    this.currentPhaseValue = currentPhaseValue;
+    this.currentPlayerValue = null;
+    this.currentPhaseValue = null;
     this.turnTimerValue = turnTimerValue;
     this.diceHud = diceHud;
     this.rollDiceButton = rollDiceButton;
@@ -768,18 +752,12 @@ export class GameBoardScreen {
     panel.className = 'absolute right-4 flex flex-col bg-slate-900/88 border border-slate-700 rounded-lg shadow-lg overflow-hidden pointer-events-auto';
     panel.style.bottom = `${GAME_BOARD_BOTTOM_BAR_PX + 10}px`;
     panel.style.width = '260px';
-    panel.style.height = '160px';
-    panel.style.zIndex = '100'; // Temporarily increase z-index to rule out layering issues
+    panel.style.height = '170px';
+    panel.style.zIndex = '4';
     this.chatPanel = panel;
-    requestAnimationFrame(() => {
-      if (this.chatPanel && this.diceHudPanel) {
-        this.chatPanel.style.height = `${this.diceHudPanel.offsetHeight}px`;
-      }
-    });
 
     const messagesContainer = document.createElement('div');
     messagesContainer.className = 'flex-1 overflow-y-auto p-2 text-xs text-white font-hexahaven-ui';
-    messagesContainer.className = 'flex-1 overflow-y-auto p-2 text-xs text-white font-sans';
     messagesContainer.style.scrollbarWidth = 'thin';
     this.chatMessagesContainer = messagesContainer;
 
@@ -789,7 +767,6 @@ export class GameBoardScreen {
     const input = document.createElement('input');
     input.type = 'text';
     input.placeholder = 'Chat...';
-    input.className = 'flex-1 bg-transparent border-none px-2 py-1.5 text-xs text-white focus:outline-none';
     input.className = 'flex-1 bg-transparent border-none px-2 py-1.5 text-xs text-white focus:outline-none font-sans';
     this.chatInput = input;
 
@@ -836,41 +813,85 @@ export class GameBoardScreen {
       return;
     }
 
-    const messages = this.liveGameState.chatMessages || [];
+    const gameState = this.liveGameState;
+    const messages = gameState.chatMessages || [];
+    const statusText = this.buildStatusInfoLine(gameState);
+    const statusKey = `${gameState.turn.currentTurn ?? 0}|${gameState.turn.currentPlayerId ?? ''}|${gameState.turn.phase}|${statusText}`;
+    if (this.lastStatusLogKey !== statusKey) {
+      this.lastStatusLogKey = statusKey;
+      this.statusChatLog.push({ timestampMs: Date.now(), text: statusText });
+    }
+
+    const combinedEntries: Array<
+      | { kind: 'player'; timestampMs: number; message: typeof messages[number] }
+      | { kind: 'info'; timestampMs: number; text: string }
+    > = [];
+    messages.forEach((msg) => {
+      const ts = Date.parse(msg.timestamp);
+      combinedEntries.push({
+        kind: 'player',
+        timestampMs: Number.isFinite(ts) ? ts : 0,
+        message: msg,
+      });
+    });
+    this.statusChatLog.forEach((entry) => {
+      combinedEntries.push({
+        kind: 'info',
+        timestampMs: entry.timestampMs,
+        text: entry.text,
+      });
+    });
+    combinedEntries.sort((a, b) => a.timestampMs - b.timestampMs);
+
     this.chatMessagesContainer.innerHTML = '';
+    combinedEntries.forEach((entry) => {
+      const div = document.createElement('div');
+      div.className = 'mb-1 leading-tight text-sm font-sans bg-slate-800/40 p-1 rounded';
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'font-bold';
+      const msgSpan = document.createElement('span');
+      msgSpan.className = 'text-white';
 
-    messages.forEach((msg, index) => {
-      try {
-        const div = document.createElement('div');
-        div.className = 'mb-1 leading-tight text-sm font-hexahaven-ui bg-slate-800/40 p-1 rounded';
-        div.className = 'mb-1 leading-tight text-sm font-sans bg-slate-800/40 p-1 rounded';
-        
-        const sender = this.liveGameState?.playersById[msg.senderId];
+      const timeString = this.formatChatTimestamp(entry.timestampMs);
+      if (entry.kind === 'player') {
+        const sender = gameState.playersById[entry.message.senderId];
         const color = sender?.color || '#cbd5e1';
-        const name = msg.senderName || 'Unknown'; // Fallback to 'Unknown' if senderName is missing
-
-        // Format timestamp to [HH:MM]
-        const date = new Date(msg.timestamp);
-        const timeString = `[${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}]`;
-
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'font-bold';
+        const name = entry.message.senderName || 'Unknown';
         nameSpan.style.color = color;
-        nameSpan.textContent = `${timeString} ${name}: `; // Prepend timestamp
-
-        const msgSpan = document.createElement('span');
-        msgSpan.className = 'text-white';
-        msgSpan.textContent = msg.message || '[Empty Message]';
-
-        div.appendChild(nameSpan);
-        div.appendChild(msgSpan);
-        this.chatMessagesContainer!.appendChild(div);
-      } catch (err) {
-        console.error(`[Chat] Failed to render message at index ${index}:`, err);
+        nameSpan.textContent = `${timeString} ${name}: `;
+        msgSpan.textContent = entry.message.message || '[Empty Message]';
+      } else {
+        nameSpan.style.color = '#67e8f9';
+        nameSpan.textContent = `${timeString} INFO: `;
+        msgSpan.textContent = entry.text;
       }
+
+      div.appendChild(nameSpan);
+      div.appendChild(msgSpan);
+      this.chatMessagesContainer?.appendChild(div);
     });
 
     this.chatMessagesContainer.scrollTop = this.chatMessagesContainer.scrollHeight;
+  }
+
+  private formatChatTimestamp(timestampMs: number): string {
+    const date = Number.isFinite(timestampMs) ? new Date(timestampMs) : new Date();
+    return `[${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}]`;
+  }
+
+  private buildStatusInfoLine(gameState: GameState): string {
+    const activePlayerId = gameState.turn.currentPlayerId;
+    const activePlayer = activePlayerId ? gameState.playersById[activePlayerId] : null;
+    const activeName = activePlayer?.displayName ?? 'Unknown player';
+    const phase = gameState.turn.phase;
+    const turnPrefix = `Turn ${gameState.turn.currentTurn ?? 0}: `;
+    if (phase === 'ROLL') {
+      return `${turnPrefix}${activeName}'s turn to roll dice.`;
+    }
+    if (phase === 'ACTION') {
+      return `${turnPrefix}${activeName}'s action phase (build, trade, or end turn).`;
+    }
+    return `${turnPrefix}${activeName} is in ${phase} phase.`;
   }
   private renderPlayerCardsFromGameState(): void {
     const gameState = this.liveGameState;
@@ -1854,6 +1875,8 @@ export class GameBoardScreen {
     }
     this.chatMessagesContainer = null;
     this.chatInput = null;
+    this.statusChatLog = [];
+    this.lastStatusLogKey = null;
     this.mapScreen?.destroy();
     this.mapScreen = null;
     this.liveGameState = null;
