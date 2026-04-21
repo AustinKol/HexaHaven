@@ -618,7 +618,7 @@ export function registerSocketHandlers(io: TypedServer): void {
       logger.info(`Client disconnected: ${socket.id}`);
       const session = socketPlayerMap.get(socket.id);
       if (session) {
-        void gamePersistenceService.markPlayerDisconnected(session.gameId, session.playerId);
+        void gamePersistenceService.markPlayerDisconnected(session.gameId, session.playerId, socket.id);
       }
       socketPlayerMap.delete(socket.id);
     });

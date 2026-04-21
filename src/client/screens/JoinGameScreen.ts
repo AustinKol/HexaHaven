@@ -66,11 +66,12 @@ export class JoinGameScreen {
           joinCode: roomId,
           displayName: name,
         });
+        const joinedPlayer = ack.gameState.playersById[ack.playerId];
         setLobbySession({
           roomId: ack.gameState.roomCode,
           playerId: ack.playerId,
-          playerName: name,
-          role: 'guest',
+          playerName: joinedPlayer?.displayName ?? name,
+          role: joinedPlayer?.isHost ? 'host' : 'guest',
         });
         this.navigate?.(ScreenId.WaitingRoom);
       } catch (error) {

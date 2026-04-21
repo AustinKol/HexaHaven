@@ -185,6 +185,32 @@ function isResourceType(value: string): value is ResourceType {
   return RESOURCE_TYPES.includes(value as ResourceType);
 }
 
+function normalizeDisplayNameForMatch(displayName: string): string {
+  return displayName.trim().toLocaleLowerCase();
+}
+
+function findPlayerIdsByDisplayName(gameState: GameState, displayName: string): string[] {
+  const normalizedDisplayName = normalizeDisplayNameForMatch(displayName);
+  if (!normalizedDisplayName) {
+    return [];
+  }
+
+  const orderedMatches = gameState.playerOrder.filter((playerId) => {
+    const player = gameState.playersById[playerId];
+    return player ? normalizeDisplayNameForMatch(player.displayName) === normalizedDisplayName : false;
+  });
+  const seenPlayerIds = new Set(orderedMatches);
+  const additionalMatches = Object.values(gameState.playersById)
+    .filter(
+      (player) =>
+        !seenPlayerIds.has(player.playerId)
+        && normalizeDisplayNameForMatch(player.displayName) === normalizedDisplayName,
+    )
+    .map((player) => player.playerId);
+
+  return [...orderedMatches, ...additionalMatches];
+}
+
 function resolveBuildActionType(kind: BuildStructureKind): 'BUILD_ROAD' | 'BUILD_SETTLEMENT' | 'UPGRADE_SETTLEMENT' {
   if (kind === 'ROAD') {
     return 'BUILD_ROAD';
@@ -442,6 +468,22 @@ export class GamePersistenceService {
     displayName: string,
   ): Promise<{ gameState: GameState; playerId: string }> {
     const gameState = await this.loadRequiredGame(joinCode);
+    const trimmedDisplayName = displayName.trim();
+    if (!trimmedDisplayName) {
+      throw new Error('Display name is required');
+    }
+
+    const matchingPlayerIds = findPlayerIdsByDisplayName(gameState, trimmedDisplayName);
+    if (matchingPlayerIds.length > 1) {
+      throw new Error('Display name is ambiguous in this game');
+    }
+    if (matchingPlayerIds.length === 1) {
+      const matchedPlayerId = matchingPlayerIds[0];
+      const rejoinState = await this.loadRequiredGame(gameState.gameId);
+      logger.info('Player ' + trimmedDisplayName + ' rejoined game ' + rejoinState.gameId + ' as ' + matchedPlayerId);
+      return { gameState: rejoinState, playerId: matchedPlayerId };
+    }
+
     if (gameState.roomStatus !== 'waiting') {
       throw new Error('Game is not accepting new players');
     }
@@ -454,7 +496,7 @@ export class GamePersistenceService {
     const newPlayer: PlayerState = {
       playerId,
       userId: playerId,
-      displayName,
+      displayName: trimmedDisplayName,
       avatarUrl: null,
       color: PLAYER_COLOR_PALETTE[gameState.playerOrder.length % PLAYER_COLOR_PALETTE.length],
       isHost: false,
@@ -470,7 +512,7 @@ export class GamePersistenceService {
     await gameSessionsRepository.updatePlayerOrder(gameState.gameId, [...gameState.playerOrder, playerId]);
 
     const updatedGameState = await this.loadRequiredGame(gameState.gameId);
-    logger.info('Player ' + displayName + ' joined game ' + updatedGameState.gameId);
+    logger.info('Player ' + trimmedDisplayName + ' joined game ' + updatedGameState.gameId);
     return { gameState: updatedGameState, playerId };
   }
 
@@ -920,9 +962,17 @@ export class GamePersistenceService {
     });
   }
 
-  async markPlayerDisconnected(gameId: string, playerId: string): Promise<void> {
+  async markPlayerDisconnected(gameId: string, playerId: string, disconnectedConnectionId?: string): Promise<void> {
     const player = await playersRepository.getPlayer(gameId, playerId);
     if (!player) {
+      return;
+    }
+    const activeConnectionId = player.presence?.connectionId ?? '';
+    if (
+      disconnectedConnectionId
+      && activeConnectionId.length > 0
+      && activeConnectionId !== disconnectedConnectionId
+    ) {
       return;
     }
 
