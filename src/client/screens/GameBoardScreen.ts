@@ -229,6 +229,11 @@ export class GameBoardScreen {
   private pendingBuild: { kind: BuildKind; cost: ResourceBundle } | null = null;
   private liveGameState: GameState | null = null;
   private livePlayerId: string | null = null;
+  private lastResourceSnapshot: ResourceBundle | null = null;
+  private lastRenderedResourceCounts: Partial<Record<ResourceKey, number>> | null = null;
+  private resourceFxLayer: HTMLDivElement | null = null;
+  private activeResourceFxTimers: number[] = [];
+  private pendingResourceBarPops: ResourceKey[] = [];
   private fallbackLastDiceRoll = '';
   private readonly onSettingsChanged = (): void => {
     this.backgroundMusic.volume = scaledBoardMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
