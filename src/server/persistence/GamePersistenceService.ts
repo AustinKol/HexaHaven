@@ -4,7 +4,9 @@ import {
   buildEdgeLocationFromId,
   buildVertexLocationFromId,
   generateBoardTiles,
+  hexCoordKey,
   parseEdgeId,
+  parseVertexId,
 } from '../../shared/boardLayout';
 import { BUILD_COSTS, type BuildStructureKind } from '../../shared/buildRules';
 import type {
@@ -207,6 +209,21 @@ function boardHasVertex(gameState: GameState, vertexId: string): boolean {
 
 function boardHasEdge(gameState: GameState, edgeId: string): boolean {
   return Object.values(gameState.board.tilesById).some((tile) => tile.edges.includes(edgeId));
+}
+
+function verticesAreAdjacent(vertexIdA: string, vertexIdB: string): boolean {
+  const hexesA = new Set(parseVertexId(vertexIdA).map(hexCoordKey));
+  return parseVertexId(vertexIdB).filter((h) => hexesA.has(hexCoordKey(h))).length >= 2;
+}
+
+function violatesDistanceRule(gameState: GameState, vertexId: string): boolean {
+  return Object.values(gameState.board.structuresById).some(
+    (s) =>
+      (s.type === 'SETTLEMENT' || s.type === 'CITY') &&
+      s.vertex?.id !== undefined &&
+      s.vertex.id !== vertexId &&
+      verticesAreAdjacent(vertexId, s.vertex.id),
+  );
 }
 
 function edgeSharesVertex(existingEdgeId: string, candidateEdgeId: string): boolean {
@@ -541,6 +558,24 @@ export class GamePersistenceService {
       }
       if (resolveStructureAtVertex(gameState, request.vertexId)) {
         throw new Error('That settlement location is already occupied');
+      }
+      if (violatesDistanceRule(gameState, request.vertexId)) {
+        throw new Error('Settlements must be at least two roads apart');
+      }
+
+      const playerStructures = Object.values(gameState.board.structuresById).filter(
+        (s) => s.ownerPlayerId === playerId,
+      );
+      const hasExistingSettlement = playerStructures.some(
+        (s) => s.type === 'SETTLEMENT' || s.type === 'CITY',
+      );
+      if (hasExistingSettlement) {
+        const connectedByRoad = playerStructures.some(
+          (s) => s.type === 'ROAD' && s.edge?.vertexIds?.includes(request.vertexId!),
+        );
+        if (!connectedByRoad) {
+          throw new Error('Settlements must connect to one of your existing roads');
+        }
       }
 
       const vertex = buildVertexLocationFromId(request.vertexId);
