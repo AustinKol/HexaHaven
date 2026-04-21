@@ -47,10 +47,8 @@ export class MainMenuScreen {
     // Primary buttons
     const hostBtn = this.createButton('Host Game', () => this.navigate?.(ScreenId.HostGame as any));
     const joinBtn = this.createButton('Join Game', () => this.navigate?.(ScreenId.JoinGame as any));
-    const watchBtn = this.createButton('Watch Game', () => this.navigate?.(ScreenId.WatchGame as any));
     buttonContainer.appendChild(hostBtn);
     buttonContainer.appendChild(joinBtn);
-    buttonContainer.appendChild(watchBtn);
 
     // Secondary buttons
     const rulesBtn = this.createButton('How to Play', () => this.navigate?.(ScreenId.Rules as any), 'secondary');

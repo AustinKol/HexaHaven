@@ -1,12 +1,17 @@
-import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledMusicVolume } from '../audio/musicVolume';
+import { playBuildPlacementSound, playDiceRollSound } from '../audio/buildSounds';
+import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledBoardMusicVolume } from '../audio/musicVolume';
 import { ClientEnv } from '../config/env';
-import { SETTINGS_CHANGED_EVENT } from '../settings/gameSettings';
+import { BUILD_COSTS } from '../../shared/buildRules';
+import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings } from '../settings/gameSettings';
 import { ScreenId } from '../../shared/constants/screenIds';
-import type { DiceRoll, GamePhase, GameState, ResourceBundle, StructureState, VertexLocation } from '../../shared/types/domain';
-import { connectSocket, endTurn, rollDice, syncGameState } from '../networking/socketClient';
-import { clientState, setClientState, subscribeClientState } from '../state/clientState';
+import type { DiceRoll, GamePhase, GameState, ResourceBundle } from '../../shared/types/domain';
+import { bankTrade, buildStructure, connectSocket, disconnectSocket, endTurn, hydrateSession, rollDice, sendChatMessage } from '../networking/socketClient';
+import { clientState, resetClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
-import { TestMapGenScreen, type MapPointerEdgeHit, type MapPointerHit } from './TestMapGenScreen';
+
+import { TestMapGenScreen, type MapPointerHit } from './TestMapGenScreen';
+import { createDiceHud, type DiceHud } from '../ui/diceRollDisplay';
+
 
 type ResourceKey = keyof ResourceBundle;
 
@@ -14,6 +19,8 @@ type ResourceKey = keyof ResourceBundle;
 const GAME_BOARD_BOTTOM_BAR_PX = 84;
 /** ~0.5cm at 96dpi — extra inset so the map sits slightly higher. */
 const GAME_BOARD_MAP_LIFT_PX = 20;
+const FIXED_TURN_TIME_SECONDS = 30;
+const TURN_TIMER_WARNING_SECONDS = 15;
 
 /** Matches map biome feel (see TestMapGenScreen BIOME_PALETTE); tuned for UI legibility. */
 const RESOURCE_BOX_CONFIG: {
@@ -92,6 +99,16 @@ function costEntriesForRecipe(cost: ResourceBundle): { key: ResourceKey; count: 
   return RESOURCE_KEYS.filter((k) => (cost[k] ?? 0) > 0).map((k) => ({ key: k, count: cost[k] ?? 0 }));
 }
 
+/** Parses `#rgb` / `#rrggbb` for UI accents (player panel borders, etc.). */
+function hexToRgbComponents(hex: string): { r: number; g: number; b: number } | null {
+  const h = hex.replace(/^#/, '').trim();
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  if (full.length !== 6) return null;
+  const n = parseInt(full, 16);
+  if (!Number.isFinite(n)) return null;
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
 function playerCanAffordCost(inventory: ResourceBundle, cost: ResourceBundle): boolean {
   return RESOURCE_KEYS.every((k) => inventoryCount(inventory[k]) >= inventoryCount(cost[k]));
 }
@@ -110,37 +127,27 @@ function inventoryCount(n: unknown): number {
   return Math.max(0, Math.floor(v));
 }
 
-function cloneGameState(gs: GameState): GameState {
-  return JSON.parse(JSON.stringify(gs)) as GameState;
-}
-
-type BuildKind = 'ROAD' | 'SETTLEMENT' | 'CITY' | 'DEV_CARD';
+type BuildKind = 'ROAD' | 'SETTLEMENT' | 'CITY';
 
 /** Costs (paid from inventory when you can afford): Road 1E+1St · Settlement 1E+1Bl+1St · City 3St+2Bl · Dev 2Cr+2Go */
 const BUILD_OPTIONS: { kind: BuildKind; label: string; cost: ResourceBundle; iconSrc?: string }[] = [
   {
     kind: 'ROAD',
     label: 'Road',
-    cost: { CRYSTAL: 0, STONE: 1, BLOOM: 0, EMBER: 1, GOLD: 0 },
+    cost: BUILD_COSTS.ROAD,
     iconSrc: '/images/buildings/road.png',
   },
   {
     kind: 'SETTLEMENT',
     label: 'Settlement',
-    cost: { CRYSTAL: 0, STONE: 1, BLOOM: 1, EMBER: 1, GOLD: 0 },
+    cost: BUILD_COSTS.SETTLEMENT,
     iconSrc: '/images/buildings/settlement.png',
   },
   {
     kind: 'CITY',
     label: 'City',
-    cost: { CRYSTAL: 0, STONE: 3, BLOOM: 2, EMBER: 0, GOLD: 0 },
+    cost: BUILD_COSTS.CITY,
     iconSrc: '/images/buildings/city.png',
-  },
-  {
-    kind: 'DEV_CARD',
-    label: 'Dev Card',
-    cost: { CRYSTAL: 2, STONE: 0, BLOOM: 0, EMBER: 0, GOLD: 2 },
-    iconSrc: '/images/buildings/dev-card.png',
   },
 ];
 
@@ -164,6 +171,14 @@ export class GameBoardScreen {
   private readonly backgroundMusic = new Audio('/audio/game-board-theme.mp3');
   private exitButton: HTMLButtonElement | null = null;
   private musicToggleButton: HTMLButtonElement | null = null;
+  private settingsButton: HTMLButtonElement | null = null;
+  private gameSettingsBackdrop: HTMLDivElement | null = null;
+  private gameSettingsBoardMusicRange: HTMLInputElement | null = null;
+  private gameSettingsBoardMusicValueEl: HTMLElement | null = null;
+  private gameSettingsGameSfxRange: HTMLInputElement | null = null;
+  private gameSettingsGameSfxValueEl: HTMLElement | null = null;
+  private gameSettingsKeydown: ((e: KeyboardEvent) => void) | null = null;
+  private topRightContainer: HTMLElement | null = null;
   private playerPanel: HTMLDivElement | null = null;
   private resourceBar: HTMLDivElement | null = null;
   /** Player + resource buttons; cleared on each state refresh. */
@@ -173,11 +188,33 @@ export class GameBoardScreen {
   /** Left bar: tap counts 0…owned (optional; build actions pay from inventory when you can afford). */
   private resourceSelection: ResourceBundle = emptyResourceBundle();
   private turnHudPanel: HTMLDivElement | null = null;
+  /** Dice display — bottom-left, above the resource bar. */
+  private diceHudPanel: HTMLDivElement | null = null;
   private currentPlayerValue: HTMLDivElement | null = null;
   private currentPhaseValue: HTMLDivElement | null = null;
-  private lastDiceRollValue: HTMLDivElement | null = null;
+  private turnTimerValue: HTMLDivElement | null = null;
+  private turnTimerTicker: number | null = null;
+  private lastTimerTurnKey: string | null = null;
+  private nearTimeoutTickSecond: number | null = null;
+  private diceHud: DiceHud | null = null;
+  /** Local roll: waiting for server `lastDiceRoll` after clicking Roll. */
+  private expectingLocalDiceAck = false;
+  private diceRollTicker: number | null = null;
+  private diceFailSafeTimer: number | null = null;
+  private diceCompleteDelayTimer: number | null = null;
+  private localDiceRollStartedAt: number | null = null;
   private rollDiceButton: HTMLButtonElement | null = null;
+  private chatPanel: HTMLDivElement | null = null;
+  private chatMessagesContainer: HTMLDivElement | null = null;
+  private chatInput: HTMLInputElement | null = null;
+  private statusChatLog: { timestampMs: number; text: string }[] = [];
+  private lastStatusLogKey: string | null = null;
+  private bankTradeButton: HTMLButtonElement | null = null;
   private endTurnButton: HTMLButtonElement | null = null;
+  private bankGiveSelection: ResourceKey = 'EMBER';
+  private bankReceiveSelection: ResourceKey = 'STONE';
+  private bankGiveButtons: Partial<Record<ResourceKey, HTMLButtonElement>> = {};
+  private bankReceiveButtons: Partial<Record<ResourceKey, HTMLButtonElement>> = {};
   private buttonContainer: HTMLElement | null = null;
   private isMusicMuted = false;
   private turnHudBindings: GameBoardTurnHudBindings | null = null;
@@ -192,8 +229,111 @@ export class GameBoardScreen {
   private livePlayerId: string | null = null;
   private fallbackLastDiceRoll = 'Not rolled yet';
   private readonly onSettingsChanged = (): void => {
-    this.backgroundMusic.volume = scaledMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
+    this.backgroundMusic.volume = scaledBoardMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
+    this.syncGameSettingsPanelSliders();
   };
+
+  private resolveTurnEndsAtMs(gameState: GameState | null): number | null {
+    const turnEndsAt = gameState?.turn.turnEndsAt;
+    if (turnEndsAt) {
+      const parsed = Date.parse(turnEndsAt);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    const turnStartedAt = gameState?.turn.turnStartedAt;
+    if (turnStartedAt) {
+      const startedMs = Date.parse(turnStartedAt);
+      if (Number.isFinite(startedMs)) {
+        return startedMs + (FIXED_TURN_TIME_SECONDS * 1000);
+      }
+    }
+    return null;
+  }
+
+  private playNearTimeoutTick(): void {
+    try {
+      const Ctor = window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctor) {
+        return;
+      }
+      const context = new Ctor();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = 'square';
+      oscillator.frequency.value = 880;
+      gain.gain.value = 0.02;
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.09);
+      window.setTimeout(() => {
+        void context.close();
+      }, 150);
+    } catch {
+      // Ignore audio failures caused by browser gesture policy or unavailable API.
+    }
+  }
+
+  private startTurnTimerTicker(): void {
+    if (this.turnTimerTicker !== null) {
+      return;
+    }
+    this.turnTimerTicker = window.setInterval(() => {
+      this.updateTurnTimerUi();
+    }, 250);
+  }
+
+  private stopTurnTimerTicker(): void {
+    if (this.turnTimerTicker !== null) {
+      clearInterval(this.turnTimerTicker);
+      this.turnTimerTicker = null;
+    }
+    this.lastTimerTurnKey = null;
+    this.nearTimeoutTickSecond = null;
+  }
+
+  private updateTurnTimerUi(): void {
+    if (!this.turnTimerValue) {
+      return;
+    }
+    const gameState = this.liveGameState ?? clientState.gameState;
+    const activePlayerId = gameState?.turn.currentPlayerId ?? null;
+    const turnKey = activePlayerId ? `${gameState?.turn.currentTurn ?? 0}:${activePlayerId}` : null;
+    if (turnKey && turnKey !== this.lastTimerTurnKey) {
+      this.lastTimerTurnKey = turnKey;
+      this.nearTimeoutTickSecond = null;
+    }
+
+    const turnEndsAtMs = this.resolveTurnEndsAtMs(gameState);
+    if (!Number.isFinite(turnEndsAtMs)) {
+      this.turnTimerValue.textContent = '--:--';
+      this.turnTimerValue.style.background = 'rgba(15, 23, 42, 0.9)';
+      this.turnTimerValue.style.borderColor = 'rgba(148, 163, 184, 0.65)';
+      this.turnTimerValue.style.color = '#e2e8f0';
+      return;
+    }
+
+    const remainingMs = Math.max(0, (turnEndsAtMs as number) - Date.now());
+    const remainingSec = Math.ceil(remainingMs / 1000);
+    const min = Math.floor(remainingSec / 60);
+    const sec = remainingSec % 60;
+    this.turnTimerValue.textContent = `${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+
+    if (remainingSec <= TURN_TIMER_WARNING_SECONDS) {
+      this.turnTimerValue.style.background = 'rgba(127, 29, 29, 0.92)';
+      this.turnTimerValue.style.borderColor = 'rgba(248, 113, 113, 0.95)';
+      this.turnTimerValue.style.color = '#fee2e2';
+      if (remainingSec > 0 && remainingSec !== this.nearTimeoutTickSecond) {
+        this.nearTimeoutTickSecond = remainingSec;
+        this.playNearTimeoutTick();
+      }
+    } else {
+      this.turnTimerValue.style.background = 'rgba(8, 47, 73, 0.9)';
+      this.turnTimerValue.style.borderColor = 'rgba(34, 211, 238, 0.85)';
+      this.turnTimerValue.style.color = '#cffafe';
+    }
+  }
 
   constructor() {
     this.backgroundMusic.loop = true;
@@ -213,21 +353,37 @@ export class GameBoardScreen {
     this.livePlayerId = session?.playerId ?? null;
 
     const gameState = this.liveGameState ?? clientState.gameState;
+    const boardTiles = gameState ? Object.values(gameState.board.tilesById) : [];
     const structures = gameState ? Object.values(gameState.board.structuresById) : [];
+    const pendingKind =
+      this.pendingBuild?.kind === 'SETTLEMENT'
+        ? 'SETTLEMENT'
+        : this.pendingBuild?.kind === 'CITY'
+          ? 'CITY'
+          : this.pendingBuild?.kind === 'ROAD'
+            ? 'ROAD'
+            : null;
+    const livePid = this.livePlayerId;
+    const roadHoverColor =
+      pendingKind === 'ROAD' && livePid && gameState?.playersById[livePid]?.color
+        ? gameState.playersById[livePid].color
+        : undefined;
 
     this.mapScreen = new TestMapGenScreen({
       showExitButton: false,
       enableBackgroundMusic: false,
       showRegenerateButton: false,
       allowPointerRegenerate: false,
-      mapSeed: roomId ?? undefined,
+      mapSeed: gameState?.config.mapSeed ?? roomId ?? undefined,
       compactFit: true,
       reservedBottomPx: GAME_BOARD_BOTTOM_BAR_PX,
       mapLiftPx: GAME_BOARD_MAP_LIFT_PX,
       onMapPointerDown: (hit) => this.handleMapPlaceClick(hit),
-      pendingBuildKind: this.pendingBuild?.kind === 'SETTLEMENT' ? 'SETTLEMENT' : this.pendingBuild?.kind === 'CITY' ? 'CITY' : this.pendingBuild?.kind === 'ROAD' ? 'ROAD' : null,
+      pendingBuildKind: pendingKind,
+      boardTiles,
+      roadHoverColor,
       structures: structures.map(s => ({
-        type: s.type === 'GARDEN' ? 'CITY' : (s.type as 'SETTLEMENT' | 'ROAD'),
+        type: s.type as 'SETTLEMENT' | 'CITY' | 'ROAD',
         ownerColor: s.ownerColor,
         vertex: s.vertex,
         edge: s.edge,
@@ -245,10 +401,16 @@ export class GameBoardScreen {
     }
     this.mountPlayerPanel(this.buttonContainer);
     this.mountTurnHud(this.buttonContainer);
+    this.startTurnTimerTicker();
+    this.mountChatPanel(this.buttonContainer);
     this.mountResourceBar(this.buttonContainer);
     if (roomId) {
       connectSocket({ gameId: roomId, playerId: session?.playerId });
+      void hydrateSession(roomId).catch((error) => {
+        console.error('Failed to hydrate game session:', error);
+      });
       this.unsubscribe = subscribeClientState((state) => {
+        console.log('[GameBoardScreen] Client state updated. Chat messages count:', state.gameState?.chatMessages?.length);
         this.liveGameState = state.gameState;
         this.livePlayerId = state.playerId ?? this.livePlayerId;
         this.updateTurnHud();
@@ -264,13 +426,39 @@ export class GameBoardScreen {
     }
     const navigateTo = navigate;
 
+    const topRight = document.createElement('div');
+    topRight.style.position = 'absolute';
+    topRight.style.top = '16px';
+    topRight.style.right = '16px';
+    topRight.style.zIndex = '3';
+    topRight.style.display = 'flex';
+    topRight.style.flexDirection = 'row';
+    topRight.style.alignItems = 'center';
+    topRight.style.gap = '8px';
+
+    this.settingsButton = document.createElement('button');
+    this.settingsButton.type = 'button';
+    this.settingsButton.className = 'font-hexahaven-ui';
+    this.settingsButton.style.display = 'flex';
+    this.settingsButton.style.alignItems = 'center';
+    this.settingsButton.style.justifyContent = 'center';
+    this.settingsButton.style.width = '40px';
+    this.settingsButton.style.height = '40px';
+    this.settingsButton.style.padding = '0';
+    this.settingsButton.style.color = '#ffffff';
+    this.settingsButton.style.background = 'rgba(15, 23, 42, 0.85)';
+    this.settingsButton.style.border = '1px solid rgba(255, 255, 255, 0.35)';
+    this.settingsButton.style.borderRadius = '8px';
+    this.settingsButton.style.cursor = 'pointer';
+    this.settingsButton.title = 'Game audio settings';
+    this.settingsButton.setAttribute('aria-label', 'Game audio settings');
+    this.settingsButton.innerHTML =
+      '<svg aria-hidden="true" viewBox="0 0 24 24" style="width:22px;height:22px;fill:currentColor;"><path d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.31-.09.63-.09.94s.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>';
+    this.settingsButton.addEventListener('click', () => this.toggleGameSettingsPanel());
+
     this.exitButton = document.createElement('button');
     this.exitButton.textContent = 'Exit to Menu';
     this.exitButton.className = 'font-hexahaven-ui';
-    this.exitButton.style.position = 'absolute';
-    this.exitButton.style.top = '16px';
-    this.exitButton.style.right = '16px';
-    this.exitButton.style.zIndex = '3';
     this.exitButton.style.padding = '8px 10px';
     this.exitButton.style.fontSize = '14px';
     this.exitButton.style.fontWeight = '600';
@@ -280,31 +468,31 @@ export class GameBoardScreen {
     this.exitButton.style.borderRadius = '8px';
     this.exitButton.style.cursor = 'pointer';
     this.exitButton.addEventListener('click', () => {
+      disconnectSocket();
       clearLobbySession();
+      resetClientState();
       navigateTo(ScreenId.MainMenu);
     });
-    this.buttonContainer.appendChild(this.exitButton);
-
+    topRight.appendChild(this.settingsButton);
     this.musicToggleButton = document.createElement('button');
     this.musicToggleButton.type = 'button';
-    this.musicToggleButton.style.position = 'absolute';
-    /** Sits on the bottom bar: overlap ~half the button with the bar; +38px total lift (incl. ~0.2cm @ 96dpi). */
-    this.musicToggleButton.style.bottom = `${Math.max(12, GAME_BOARD_BOTTOM_BAR_PX - 32 + 38)}px`;
-    this.musicToggleButton.style.right = '16px';
-    this.musicToggleButton.style.zIndex = '10';
     this.musicToggleButton.style.display = 'flex';
     this.musicToggleButton.style.alignItems = 'center';
     this.musicToggleButton.style.justifyContent = 'center';
-    this.musicToggleButton.style.width = '44px';
-    this.musicToggleButton.style.height = '44px';
+    this.musicToggleButton.style.width = '40px';
+    this.musicToggleButton.style.height = '40px';
+    this.musicToggleButton.style.padding = '0';
     this.musicToggleButton.style.color = '#ffffff';
     this.musicToggleButton.style.background = 'rgba(15, 23, 42, 0.85)';
     this.musicToggleButton.style.border = '1px solid rgba(255, 255, 255, 0.35)';
-    this.musicToggleButton.style.borderRadius = '9999px';
+    this.musicToggleButton.style.borderRadius = '8px';
     this.musicToggleButton.style.cursor = 'pointer';
     this.musicToggleButton.addEventListener('click', () => this.toggleMusic());
     this.updateMusicButtonIcon();
-    this.buttonContainer.appendChild(this.musicToggleButton);
+    topRight.appendChild(this.musicToggleButton);
+    topRight.appendChild(this.exitButton);
+    this.topRightContainer = topRight;
+    this.buttonContainer.appendChild(topRight);
   }
 
   private mountPlayerPanel(parent: HTMLElement): void {
@@ -312,7 +500,7 @@ export class GameBoardScreen {
       this.playerPanel.remove();
     }
     const panel = document.createElement('div');
-    panel.className = 'absolute top-16 left-4 flex flex-col gap-2';
+    panel.className = 'absolute top-4 left-4 flex flex-col gap-2';
     panel.style.zIndex = '3';
     panel.style.width = '128px';
     this.playerPanel = panel;
@@ -361,17 +549,23 @@ export class GameBoardScreen {
     if (this.turnHudPanel) {
       this.turnHudPanel.remove();
     }
+    if (this.diceHudPanel) {
+      this.diceHudPanel.remove();
+    }
+
+    this.bankGiveButtons = {};
+    this.bankReceiveButtons = {};
 
     const panel = document.createElement('div');
-    panel.className = 'absolute top-16 right-4 rounded-xl border border-slate-600 bg-slate-900/88 px-4 py-3 text-white shadow-md';
+    panel.className = 'absolute top-16 right-4 rounded-xl border border-slate-600 bg-slate-900/88 px-3 py-2 text-white shadow-md';
     panel.style.zIndex = '3';
-    panel.style.width = '230px';
+    panel.style.width = '260px';
 
     const header = document.createElement('div');
     header.className = 'mb-2 flex items-center justify-between gap-2';
 
     const title = document.createElement('div');
-    title.className = 'font-hexahaven-ui text-sm font-semibold';
+    title.className = 'font-hexahaven-ui text-xs font-semibold';
     title.textContent = 'Turn HUD (DEMO)';
     header.appendChild(title);
 
@@ -384,70 +578,323 @@ export class GameBoardScreen {
       header.appendChild(devBadge);
     }
 
-    const currentPlayerLabel = document.createElement('div');
-    currentPlayerLabel.className = 'font-hexahaven-ui text-xs text-slate-300';
-    currentPlayerLabel.textContent = 'Current Player';
+    const turnTimerLabel = document.createElement('div');
+    turnTimerLabel.className = 'font-hexahaven-ui text-[10px] text-cyan-200';
+    turnTimerLabel.textContent = 'Turn Timer';
 
-    const currentPlayerValue = document.createElement('div');
-    currentPlayerValue.className = 'font-hexahaven-ui text-sm font-semibold mb-2';
+    const turnTimerValue = document.createElement('div');
+    turnTimerValue.className =
+      'font-hexahaven-ui mb-2 rounded-md border px-2 py-1 text-center text-lg font-bold tracking-widest tabular-nums';
+    turnTimerValue.textContent = '01:00';
 
-    const currentPhaseLabel = document.createElement('div');
-    currentPhaseLabel.className = 'font-hexahaven-ui text-xs text-slate-300';
-    currentPhaseLabel.textContent = 'Current Phase';
-
-    const currentPhaseValue = document.createElement('div');
-    currentPhaseValue.className = 'font-hexahaven-ui text-sm font-semibold mb-2';
+    const diceHud = createDiceHud();
+    diceHud.root.style.marginBottom = '0';
 
     const lastDiceRollLabel = document.createElement('div');
     lastDiceRollLabel.className = 'font-hexahaven-ui text-xs text-slate-300';
     lastDiceRollLabel.textContent = 'Last Dice Roll';
 
-    const lastDiceRollValue = document.createElement('div');
-    lastDiceRollValue.className = 'font-hexahaven-ui text-sm font-semibold mb-3';
-
-    const actions = document.createElement('div');
-    actions.className = 'grid grid-cols-2 gap-2';
+    const dicePanel = document.createElement('div');
+    dicePanel.className =
+      'absolute left-4 flex flex-col gap-2 rounded-xl border border-slate-600 bg-slate-900/88 px-3 py-2 text-white shadow-md pointer-events-auto';
+    dicePanel.style.zIndex = '3';
+    dicePanel.style.bottom = `${GAME_BOARD_BOTTOM_BAR_PX + 10}px`;
+    dicePanel.setAttribute('aria-label', 'Dice roll');
+    dicePanel.appendChild(lastDiceRollLabel);
+    dicePanel.appendChild(diceHud.root);
 
     const rollDiceButton = document.createElement('button');
-    rollDiceButton.className = 'font-hexahaven-ui rounded-md border border-cyan-400/60 bg-cyan-900/60 px-2 py-2 text-xs font-semibold';
+    rollDiceButton.type = 'button';
+    rollDiceButton.className =
+      'font-hexahaven-ui w-full rounded-md border border-cyan-400/60 bg-cyan-900/60 px-2 py-2 text-xs font-semibold';
     rollDiceButton.textContent = 'Roll Dice';
     rollDiceButton.addEventListener('click', () => this.handleRollDiceClick());
+    dicePanel.appendChild(rollDiceButton);
+
+    const actions = document.createElement('div');
+    actions.className = 'flex flex-col gap-1.5';
 
     const endTurnButton = document.createElement('button');
-    endTurnButton.className = 'font-hexahaven-ui rounded-md border border-emerald-400/60 bg-emerald-900/60 px-2 py-2 text-xs font-semibold';
+    endTurnButton.type = 'button';
+    endTurnButton.className =
+      'font-hexahaven-ui rounded-md border border-emerald-400/60 bg-emerald-900/60 px-2 py-1.5 text-[11px] font-semibold';
     endTurnButton.textContent = 'End Turn';
     endTurnButton.addEventListener('click', () => this.handleEndTurnClick());
 
-    actions.appendChild(rollDiceButton);
+    const bankGiveLabel = document.createElement('div');
+    bankGiveLabel.className = 'font-hexahaven-ui text-[11px] text-slate-300';
+    bankGiveLabel.textContent = 'Give 4';
+
+    const bankGiveRow = document.createElement('div');
+    bankGiveRow.className = 'flex flex-wrap gap-1';
+
+    RESOURCE_BOX_CONFIG.forEach(({ key, shortLabel, iconSrc, boxBg, boxBorder, boxHoverBg, countColor }) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'flex h-9 w-9 items-center justify-center rounded-md border transition-colors';
+      btn.style.backgroundColor = boxBg;
+      btn.style.borderColor = boxBorder;
+      btn.style.color = countColor;
+      btn.style.cursor = 'pointer';
+
+      btn.addEventListener('mouseenter', () => {
+        btn.style.backgroundColor = boxHoverBg;
+      });
+      btn.addEventListener('mouseleave', () => {
+        btn.style.backgroundColor = boxBg;
+      });
+
+      btn.addEventListener('click', () => {
+        this.bankGiveSelection = key;
+        this.refreshBankTradeUi();
+        this.updateTurnHud();
+      });
+
+      if (iconSrc) {
+        const img = document.createElement('img');
+        img.src = iconSrc;
+        img.alt = shortLabel;
+        img.className = 'h-6 w-6 object-contain pointer-events-none';
+        img.draggable = false;
+        btn.appendChild(img);
+      } else {
+        btn.textContent = shortLabel;
+      }
+
+      this.bankGiveButtons[key] = btn;
+      bankGiveRow.appendChild(btn);
+    });
+
+    const bankReceiveLabel = document.createElement('div');
+    bankReceiveLabel.className = 'font-hexahaven-ui text-[11px] text-slate-300';
+    bankReceiveLabel.textContent = 'Receive 1';
+
+    const bankReceiveRow = document.createElement('div');
+    bankReceiveRow.className = 'flex flex-wrap gap-1';
+
+    RESOURCE_BOX_CONFIG.forEach(({ key, shortLabel, iconSrc, boxBg, boxBorder, boxHoverBg, countColor }) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'flex h-9 w-9 items-center justify-center rounded-md border transition-colors';
+      btn.style.backgroundColor = boxBg;
+      btn.style.borderColor = boxBorder;
+      btn.style.color = countColor;
+      btn.style.cursor = 'pointer';
+
+      btn.addEventListener('mouseenter', () => {
+        btn.style.backgroundColor = boxHoverBg;
+      });
+      btn.addEventListener('mouseleave', () => {
+        btn.style.backgroundColor = boxBg;
+      });
+
+      btn.addEventListener('click', () => {
+        this.bankReceiveSelection = key;
+        this.refreshBankTradeUi();
+        this.updateTurnHud();
+      });
+
+      if (iconSrc) {
+        const img = document.createElement('img');
+        img.src = iconSrc;
+        img.alt = shortLabel;
+        img.className = 'h-6 w-6 object-contain pointer-events-none';
+        img.draggable = false;
+        btn.appendChild(img);
+      } else {
+        btn.textContent = shortLabel;
+      }
+
+      this.bankReceiveButtons[key] = btn;
+      bankReceiveRow.appendChild(btn);
+    });
+
+    const bankTradeButton = document.createElement('button');
+    bankTradeButton.type = 'button';
+    bankTradeButton.className =
+      'font-hexahaven-ui rounded-md border border-amber-400/60 bg-amber-900/60 px-2 py-2 text-xs font-semibold';
+    bankTradeButton.addEventListener('click', () => this.handleBankTradeClick());
+
+    actions.appendChild(bankGiveLabel);
+    actions.appendChild(bankGiveRow);
+    actions.appendChild(bankReceiveLabel);
+    actions.appendChild(bankReceiveRow);
+    actions.appendChild(bankTradeButton);
     actions.appendChild(endTurnButton);
 
     panel.appendChild(header);
-    panel.appendChild(currentPlayerLabel);
-    panel.appendChild(currentPlayerValue);
-    panel.appendChild(currentPhaseLabel);
-    panel.appendChild(currentPhaseValue);
-    panel.appendChild(lastDiceRollLabel);
-    panel.appendChild(lastDiceRollValue);
+    panel.appendChild(turnTimerLabel);
+    panel.appendChild(turnTimerValue);
     panel.appendChild(actions);
 
     this.turnHudPanel = panel;
-    this.currentPlayerValue = currentPlayerValue;
-    this.currentPhaseValue = currentPhaseValue;
-    this.lastDiceRollValue = lastDiceRollValue;
+    this.diceHudPanel = dicePanel;
+    this.currentPlayerValue = null;
+    this.currentPhaseValue = null;
+    this.turnTimerValue = turnTimerValue;
+    this.diceHud = diceHud;
     this.rollDiceButton = rollDiceButton;
     this.endTurnButton = endTurnButton;
+    this.bankTradeButton = bankTradeButton;
 
     parent.appendChild(panel);
+    parent.appendChild(dicePanel);
+
+    this.refreshBankTradeUi();
     this.updateTurnHud();
+    this.updateTurnTimerUi();
+  }
+
+  private mountChatPanel(parent: HTMLElement): void {
+    if (this.chatPanel) {
+      this.chatPanel.remove();
+    }
+
+    const panel = document.createElement('div');
+    panel.className = 'absolute right-4 flex flex-col bg-slate-900/88 border border-slate-700 rounded-lg shadow-lg overflow-hidden pointer-events-auto';
+    panel.style.bottom = `${GAME_BOARD_BOTTOM_BAR_PX + 10}px`;
+    panel.style.width = '260px';
+    panel.style.height = '170px';
+    panel.style.zIndex = '4';
+    this.chatPanel = panel;
+
+    const messagesContainer = document.createElement('div');
+    messagesContainer.className = 'flex-1 overflow-y-auto p-2 text-xs text-white font-hexahaven-ui';
+    messagesContainer.style.scrollbarWidth = 'thin';
+    this.chatMessagesContainer = messagesContainer;
+
+    const inputContainer = document.createElement('div');
+    inputContainer.className = 'flex border-t border-slate-700 bg-slate-800/50';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Chat...';
+    input.className = 'flex-1 bg-transparent border-none px-2 py-1.5 text-xs text-white focus:outline-none font-sans';
+    this.chatInput = input;
+
+    const sendBtn = document.createElement('button');
+    sendBtn.textContent = 'Send';
+    sendBtn.className = 'px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-cyan-400 hover:text-cyan-300 transition-colors';
+
+    sendBtn.addEventListener('click', () => this.handleSendChatMessage());
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        this.handleSendChatMessage();
+      }
+    });
+
+    inputContainer.appendChild(input);
+    inputContainer.appendChild(sendBtn);
+    panel.appendChild(messagesContainer);
+    panel.appendChild(inputContainer);
+    parent.appendChild(panel);
+  }
+
+  private handleSendChatMessage(): void {
+    if (!this.chatInput) return;
+    const message = this.chatInput.value.trim();
+    if (message.length === 0) return;
+
+    const roomId = getLobbySession()?.roomId ?? null;
+    if (roomId) {
+      void sendChatMessage(roomId, message);
+      this.chatInput.value = '';
+    }
   }
 
   private refreshPlayerUi(): void {
     this.renderPlayerCardsFromGameState();
     this.renderResourceBarFromGameState();
     this.renderBuildingBarFromGameState();
+    this.renderChatMessages();
     this.updateMapDisplay();
   }
 
+  private renderChatMessages(): void {
+    if (!this.chatMessagesContainer || !this.liveGameState) {
+      return;
+    }
+
+    const gameState = this.liveGameState;
+    const messages = gameState.chatMessages || [];
+    const statusText = this.buildStatusInfoLine(gameState);
+    const statusKey = `${gameState.turn.currentTurn ?? 0}|${gameState.turn.currentPlayerId ?? ''}|${gameState.turn.phase}|${statusText}`;
+    if (this.lastStatusLogKey !== statusKey) {
+      this.lastStatusLogKey = statusKey;
+      this.statusChatLog.push({ timestampMs: Date.now(), text: statusText });
+    }
+
+    const combinedEntries: Array<
+      | { kind: 'player'; timestampMs: number; message: typeof messages[number] }
+      | { kind: 'info'; timestampMs: number; text: string }
+    > = [];
+    messages.forEach((msg) => {
+      const ts = Date.parse(msg.timestamp);
+      combinedEntries.push({
+        kind: 'player',
+        timestampMs: Number.isFinite(ts) ? ts : 0,
+        message: msg,
+      });
+    });
+    this.statusChatLog.forEach((entry) => {
+      combinedEntries.push({
+        kind: 'info',
+        timestampMs: entry.timestampMs,
+        text: entry.text,
+      });
+    });
+    combinedEntries.sort((a, b) => a.timestampMs - b.timestampMs);
+
+    this.chatMessagesContainer.innerHTML = '';
+    combinedEntries.forEach((entry) => {
+      const div = document.createElement('div');
+      div.className = 'mb-1 leading-tight text-sm font-sans bg-slate-800/40 p-1 rounded';
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'font-bold';
+      const msgSpan = document.createElement('span');
+      msgSpan.className = 'text-white';
+
+      const timeString = this.formatChatTimestamp(entry.timestampMs);
+      if (entry.kind === 'player') {
+        const sender = gameState.playersById[entry.message.senderId];
+        const color = sender?.color || '#cbd5e1';
+        const name = entry.message.senderName || 'Unknown';
+        nameSpan.style.color = color;
+        nameSpan.textContent = `${timeString} ${name}: `;
+        msgSpan.textContent = entry.message.message || '[Empty Message]';
+      } else {
+        nameSpan.style.color = '#67e8f9';
+        nameSpan.textContent = `${timeString} INFO: `;
+        msgSpan.textContent = entry.text;
+      }
+
+      div.appendChild(nameSpan);
+      div.appendChild(msgSpan);
+      this.chatMessagesContainer?.appendChild(div);
+    });
+
+    this.chatMessagesContainer.scrollTop = this.chatMessagesContainer.scrollHeight;
+  }
+
+  private formatChatTimestamp(timestampMs: number): string {
+    const date = Number.isFinite(timestampMs) ? new Date(timestampMs) : new Date();
+    return `[${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}]`;
+  }
+
+  private buildStatusInfoLine(gameState: GameState): string {
+    const activePlayerId = gameState.turn.currentPlayerId;
+    const activePlayer = activePlayerId ? gameState.playersById[activePlayerId] : null;
+    const activeName = activePlayer?.displayName ?? 'Unknown player';
+    const phase = gameState.turn.phase;
+    const turnPrefix = `Turn ${gameState.turn.currentTurn ?? 0}: `;
+    if (phase === 'ROLL') {
+      return `${turnPrefix}${activeName}'s turn to roll dice.`;
+    }
+    if (phase === 'ACTION') {
+      return `${turnPrefix}${activeName}'s action phase (build, trade, or end turn).`;
+    }
+    return `${turnPrefix}${activeName} is in ${phase} phase.`;
+  }
   private renderPlayerCardsFromGameState(): void {
     const gameState = this.liveGameState;
     if (!this.playerPanel || !gameState) {
@@ -461,7 +908,17 @@ export class GameBoardScreen {
       }
 
       const card = document.createElement('div');
-      card.className = 'rounded-lg border border-slate-500 bg-slate-900/85 px-2 py-2 text-white shadow-md';
+      card.className = 'font-hexahaven-ui rounded-lg border-2 border-solid px-2 py-2 text-white shadow-md';
+      const accent = player.color || '#94a3b8';
+      card.style.borderColor = accent;
+      const rgb = hexToRgbComponents(accent);
+      if (rgb) {
+        // Interior is mostly their color, mixed with slate so labels stay legible.
+        card.style.background = `color-mix(in srgb, ${accent} 72%, rgb(15, 23, 42))`;
+        card.style.boxShadow = `0 2px 12px rgba(${rgb.r},${rgb.g},${rgb.b},0.45)`;
+      } else {
+        card.classList.add('bg-slate-900/85');
+      }
 
       const avatar = document.createElement('img');
       avatar.src = player.avatarUrl ?? '/avatar/avatar_1.png';
@@ -779,77 +1236,6 @@ export class GameBoardScreen {
     this.updateMapDisplay();
   }
 
-  private isVertexOccupied(gs: GameState, vertexId: string): boolean {
-    return Object.values(gs.board.structuresById).some(
-      (s) => s.locationType === 'VERTEX' && s.vertex?.id === vertexId,
-    );
-  }
-
-  private createSettlementStructure(
-    gs: GameState,
-    playerId: string,
-    cost: ResourceBundle,
-    vertex: VertexLocation,
-  ): StructureState {
-    const owner = gs.playersById[playerId];
-    const structureId = `settlement:${playerId}:${vertex.id}`;
-    return {
-      structureId,
-      ownerPlayerId: playerId,
-      ownerName: owner?.displayName ?? playerId,
-      ownerColor: owner?.color ?? '#ffffff',
-      type: 'SETTLEMENT',
-      level: 1,
-      locationType: 'VERTEX',
-      vertex,
-      edge: null,
-      adjacentStructures: [],
-      adjacentTiles: vertex.adjacentHexes.map((h) => `${h.q},${h.r}`),
-      builtAtTurn: gs.turn.currentTurn,
-      builtAt: new Date().toISOString(),
-      cost,
-      roadPath: null,
-    };
-  }
-
-  private createRoadStructure(
-    gs: GameState,
-    playerId: string,
-    cost: ResourceBundle,
-    edgeHit: MapPointerHit['edge'] & object,
-  ): StructureState {
-    const owner = gs.playersById[playerId];
-    const { id: edgeId, hex: hex1, edge: dir } = edgeHit;
-
-    const HEX_DIRS: [number, number][] = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
-    const [dq, dr] = HEX_DIRS[dir];
-    const hex2 = { q: hex1.q + dq, r: hex1.r + dr };
-
-    return {
-      structureId: `road:${playerId}:${edgeId}`,
-      ownerPlayerId: playerId,
-      ownerName: owner?.displayName ?? playerId,
-      ownerColor: owner?.color ?? '#ffffff',
-      type: 'ROAD',
-      level: 1,
-      locationType: 'EDGE',
-      vertex: null,
-      edge: {
-        id: edgeId,
-        hex: hex1,
-        dir,
-        adjacentHexes: [hex1, hex2],
-        vertexIds: edgeHit.vertices.map((v) => v.id),
-      },
-      adjacentStructures: [],
-      adjacentTiles: [],
-      builtAtTurn: gs.turn.currentTurn,
-      builtAt: new Date().toISOString(),
-      cost,
-      roadPath: null,
-    };
-  }
-
   private handleMapPlaceClick(hit: MapPointerHit): void {
     console.log('[Settlement] Map click:', hit);
     if (!this.pendingBuild) {
@@ -857,9 +1243,6 @@ export class GameBoardScreen {
       return;
     }
     const { kind, cost } = this.pendingBuild;
-    if (kind === 'DEV_CARD') {
-      return;
-    }
     const gs = this.liveGameState ?? clientState.gameState;
     const pid = this.livePlayerId;
     if (!gs || !pid) {
@@ -873,153 +1256,44 @@ export class GameBoardScreen {
       return;
     }
 
-    let selectedVertex: VertexLocation | null = null;
-    let selectedEdge: MapPointerHit['edge'] = null;
+    const roomId = getLobbySession()?.roomId ?? null;
+    if (!roomId) {
+      return;
+    }
 
-    if (kind === 'SETTLEMENT') {
-      selectedVertex = hit.vertex;
-      console.log('[Settlement] Checking vertex:', { vertex: selectedVertex, occupied: selectedVertex ? this.isVertexOccupied(gs, selectedVertex.id) : 'N/A' });
-      if (!selectedVertex || this.isVertexOccupied(gs, selectedVertex.id)) {
-        console.log('[Settlement] Vertex blocked or missing');
+    if (kind === 'SETTLEMENT' || kind === 'CITY') {
+      if (!hit.vertex) {
         return;
       }
-    } else if (kind === 'CITY') {
-      selectedVertex = hit.vertex;
-      if (!selectedVertex) {
-        console.log('[City] Vertex missing');
-        return;
-      }
-      const existing = Object.values(gs.board.structuresById).find(
-        (s) => s.type === 'SETTLEMENT' && s.vertex?.id === selectedVertex!.id
-      );
-      if (!existing || existing.ownerPlayerId !== pid) {
-        console.log('[City] Must upgrade from an existing settlement you own');
-        return;
-      }
-    } else if (kind === 'ROAD') {
-      if (!hit.edge) {
-        console.log('[Road] No edge hit');
-        return;
-      }
-      selectedEdge = hit.edge;
-      const canPlaceRoad = this.canPlaceRoad(gs, pid, hit.edge);
-      console.log('[Road] Checking edge:', { edge: selectedEdge.id, canPlace: canPlaceRoad });
-      if (!canPlaceRoad) {
-        console.log('[Road] Edge cannot connect to settlement or road');
-        return;
-      }
+      this.pendingBuild = null;
+      this.dismissBuildRecipePopover();
+      void buildStructure({
+        gameId: roomId,
+        kind,
+        vertexId: hit.vertex.id,
+      }).then(() => {
+        playBuildPlacementSound(kind);
+      }).catch((error) => {
+        console.error('Structure build failed:', error);
+      });
+      return;
+    }
+
+    if (!hit.edge) {
+      return;
     }
 
     this.pendingBuild = null;
-    console.log('[Settlement] Proceeding with placement');
-    this.applyBuildPurchase(kind, cost, selectedVertex, selectedEdge);
-  }
-
-  private canPlaceRoad(gs: GameState, playerId: string, edge: MapPointerEdgeHit): boolean {
-    const playerStructures = Object.values(gs.board.structuresById).filter(
-      (s) => s.ownerPlayerId === playerId,
-    );
-
-    const endpointIds = new Set(edge.vertices.map((v) => v.id));
-
-    for (const s of playerStructures) {
-      if (s.locationType === 'VERTEX' && s.vertex && endpointIds.has(s.vertex.id)) {
-        return true;
-      }
-      if (s.type === 'ROAD' && s.edge?.vertexIds) {
-        for (const vId of s.edge.vertexIds) {
-          if (endpointIds.has(vId)) {
-            return true;
-          }
-        }
-      }
-    }
-
-    return false;
-  }
-
-  private applyBuildPurchase(kind: BuildKind, cost: ResourceBundle, selectedVertex: VertexLocation | null = null, selectedEdge: MapPointerHit['edge'] = null): void {
     this.dismissBuildRecipePopover();
-    const gs = this.liveGameState ?? clientState.gameState;
-    const pid = this.livePlayerId;
-    if (!gs || !pid) {
-      return;
-    }
-    const p0 = gs.playersById[pid];
-    if (!p0 || !canAffordCost(p0.resources, cost)) {
-      return;
-    }
-    const next = cloneGameState(gs);
-    const p = next.playersById[pid];
-    if (!p) {
-      return;
-    }
-
-    let placed = false;
-    if (kind === 'SETTLEMENT' && selectedVertex) {
-      if (this.isVertexOccupied(next, selectedVertex.id)) {
-        return;
-      }
-      const settlement = this.createSettlementStructure(next, pid, cost, selectedVertex);
-      next.board.structuresById[settlement.structureId] = settlement;
-      p.stats.settlementsBuilt = (p.stats.settlementsBuilt ?? 0) + 1;
-      p.stats.publicVP = (p.stats.publicVP ?? 0) + 1;
-      placed = true;
-    } else if (kind === 'CITY' && selectedVertex) {
-      const existingKey = Object.keys(next.board.structuresById).find(
-        (key) => {
-          const s = next.board.structuresById[key];
-          return s.type === 'SETTLEMENT' && s.vertex?.id === selectedVertex.id && s.ownerPlayerId === pid;
-        }
-      );
-      if (!existingKey) {
-        return;
-      }
-      const existing = next.board.structuresById[existingKey];
-      existing.type = 'GARDEN';
-      p.stats.citiesBuilt = (p.stats.citiesBuilt ?? 0) + 1;
-      p.stats.publicVP = (p.stats.publicVP ?? 0) + 1; // +1 VP existing settlement = 2 VP total
-      placed = true;
-    } else if (kind === 'ROAD' && selectedEdge) {
-      const roadExists = Object.values(next.board.structuresById).some(
-        (s) => s.locationType === 'EDGE' && s.edge?.id === selectedEdge.id,
-      );
-      if (roadExists) {
-        return;
-      }
-      const road = this.createRoadStructure(next, pid, cost, selectedEdge);
-      next.board.structuresById[road.structureId] = road;
-      p.stats.roadsBuilt = (p.stats.roadsBuilt ?? 0) + 1;
-      placed = true;
-    }
-
-    if (!placed) {
-      return;
-    }
-
-    if (!ClientEnv.devUnlimitedMaterials) {
-      for (const k of RESOURCE_KEYS) {
-        if (inventoryCount(p.resources[k]) < inventoryCount(cost[k])) {
-          return;
-        }
-      }
-      for (const k of RESOURCE_KEYS) {
-        p.resources[k] = inventoryCount(p.resources[k]) - inventoryCount(cost[k]);
-      }
-    }
-
-    p.updatedAt = new Date().toISOString();
-    this.resourceSelection = emptyResourceBundle();
-    setClientState({ gameState: next });
-    this.liveGameState = next;
-    
-    // Force synchronize with server to bypass the frozen Demo 1 scope
-    const roomId = getLobbySession()?.roomId ?? null;
-    if (roomId) {
-      void syncGameState(roomId, next);
-    }
-
-    this.refreshPlayerUi();
+    void buildStructure({
+      gameId: roomId,
+      kind,
+      edgeId: hit.edge.id,
+    }).then(() => {
+      playBuildPlacementSound(kind);
+    }).catch((error) => {
+      console.error('Structure build failed:', error);
+    });
   }
 
   private updateMapDisplay(): void {
@@ -1030,17 +1304,23 @@ export class GameBoardScreen {
     
     const structures = Object.values(gameState.board.structuresById);
     const pendingBuildKind = this.pendingBuild?.kind === 'SETTLEMENT' ? 'SETTLEMENT' : this.pendingBuild?.kind === 'CITY' ? 'CITY' : this.pendingBuild?.kind === 'ROAD' ? 'ROAD' : null;
-    
+    const pid = this.livePlayerId;
+    const roadHoverColor =
+      pendingBuildKind === 'ROAD' && pid && gameState.playersById[pid]?.color
+        ? gameState.playersById[pid].color
+        : undefined;
+
     const scene = this.mapScreen.getPhaser3Scene?.();
     if (scene) {
       scene.updateMap(
         pendingBuildKind,
         structures.map(s => ({
-          type: s.type === 'GARDEN' ? 'CITY' : (s.type as 'SETTLEMENT' | 'ROAD'),
+          type: s.type as 'SETTLEMENT' | 'CITY' | 'ROAD',
           ownerColor: s.ownerColor,
           vertex: s.vertex,
           edge: s.edge,
-        }))
+        })),
+        roadHoverColor,
       );
     }
   }
@@ -1056,7 +1336,8 @@ export class GameBoardScreen {
 
     const currentPlayer = liveValues?.currentPlayer ?? activePlayerName ?? activePlayerId ?? 'Waiting';
     const currentPhase: GamePhase | null = liveValues?.currentPhase ?? gameState?.turn.phase ?? null;
-    const lastDiceRollText = this.formatLastDiceRollDisplay(liveValues?.lastDiceRoll ?? gameState?.turn.lastDiceRoll);
+    const lastDiceRollRaw = liveValues?.lastDiceRoll ?? gameState?.turn.lastDiceRoll;
+    const lastDiceRollObj = this.asDiceRoll(lastDiceRollRaw);
 
     const isActivePlayer = Boolean(activePlayerId && this.livePlayerId && activePlayerId === this.livePlayerId);
     const canRoll = typeof liveValues?.canRollDice === 'boolean'
@@ -1075,8 +1356,12 @@ export class GameBoardScreen {
       this.currentPhaseValue.style.color = currentPhase === 'ROLL' ? '#67e8f9' : '#86efac';
     }
 
-    if (this.lastDiceRollValue) {
-      this.lastDiceRollValue.textContent = lastDiceRollText;
+    if (this.expectingLocalDiceAck && lastDiceRollObj && this.diceRollTicker !== null) {
+      this.completeLocalDiceRoll(lastDiceRollObj);
+    }
+
+    if (this.diceHud && this.diceRollTicker === null) {
+      this.syncDiceHudFromRollData(lastDiceRollRaw);
     }
 
     if (this.rollDiceButton) {
@@ -1090,30 +1375,206 @@ export class GameBoardScreen {
       this.endTurnButton.style.opacity = this.endTurnButton.disabled ? '0.55' : '1';
       this.endTurnButton.style.cursor = this.endTurnButton.disabled ? 'not-allowed' : 'pointer';
     }
+    if (this.bankTradeButton) {
+      const canBankTrade =
+        Boolean(isActivePlayer && currentPhase === 'ACTION') &&
+        this.canCurrentPlayerUseSelectedBankTrade();
+
+      this.bankTradeButton.textContent =
+        `Trade 4 ${RESOURCE_LABELS[this.bankGiveSelection]} → 1 ${RESOURCE_LABELS[this.bankReceiveSelection]}`;
+
+      this.bankTradeButton.disabled = !canBankTrade;
+      this.bankTradeButton.style.opacity = this.bankTradeButton.disabled ? '0.55' : '1';
+      this.bankTradeButton.style.cursor = this.bankTradeButton.disabled ? 'not-allowed' : 'pointer';
+    }
+    this.updateTurnTimerUi();
   }
 
-  private formatLastDiceRollDisplay(lastDiceRoll: DiceRoll | string | null | undefined): string {
+  private asDiceRoll(raw: unknown): DiceRoll | null {
+    if (raw && typeof raw === 'object' && 'd1Val' in raw && 'd2Val' in raw && 'sum' in raw) {
+      return raw as DiceRoll;
+    }
+    return null;
+  }
+
+  private syncDiceHudFromRollData(lastDiceRoll: DiceRoll | string | null | undefined): void {
+    if (!this.diceHud) {
+      return;
+    }
     if (typeof lastDiceRoll === 'string') {
-      return lastDiceRoll;
+      this.diceHud.setFromStringMessage(lastDiceRoll);
+      return;
     }
-
     if (lastDiceRoll) {
-      return `${lastDiceRoll.d1Val} + ${lastDiceRoll.d2Val} = ${lastDiceRoll.sum}`;
+      this.diceHud.setFromRoll(lastDiceRoll);
+      return;
     }
+    this.diceHud.setPlaceholder(this.fallbackLastDiceRoll);
+  }
 
-    return this.fallbackLastDiceRoll;
+  private startLocalDiceRollAnimation(): void {
+    if (this.diceRollTicker !== null) {
+      return;
+    }
+    if (this.diceCompleteDelayTimer !== null) {
+      clearTimeout(this.diceCompleteDelayTimer);
+      this.diceCompleteDelayTimer = null;
+    }
+    this.expectingLocalDiceAck = true;
+    this.localDiceRollStartedAt = Date.now();
+    playDiceRollSound();
+    this.diceHud?.setRollingShake(true);
+    this.diceHud?.setRandomRollingFrame();
+    this.diceRollTicker = window.setInterval(() => {
+      this.diceHud?.setRandomRollingFrame();
+    }, 72);
+    this.diceFailSafeTimer = window.setTimeout(() => {
+      this.cancelLocalDiceRollAnimation();
+    }, 5000);
+  }
+
+  private completeLocalDiceRoll(roll: DiceRoll): void {
+    const startedAt = this.localDiceRollStartedAt;
+    if (startedAt !== null) {
+      const elapsedMs = Date.now() - startedAt;
+      const remainingMs = Math.max(0, 1000 - elapsedMs);
+      if (remainingMs > 0) {
+        if (this.diceCompleteDelayTimer === null) {
+          this.diceCompleteDelayTimer = window.setTimeout(() => {
+            this.diceCompleteDelayTimer = null;
+            this.completeLocalDiceRoll(roll);
+          }, remainingMs);
+        }
+        return;
+      }
+    }
+    if (this.diceRollTicker !== null) {
+      clearInterval(this.diceRollTicker);
+      this.diceRollTicker = null;
+    }
+    if (this.diceFailSafeTimer !== null) {
+      clearTimeout(this.diceFailSafeTimer);
+      this.diceFailSafeTimer = null;
+    }
+    this.localDiceRollStartedAt = null;
+    this.expectingLocalDiceAck = false;
+    this.diceHud?.setRollingShake(false);
+    this.diceHud?.setFromRoll(roll);
+    this.diceHud?.playSettle();
+  }
+
+  private cancelLocalDiceRollAnimation(): void {
+    if (this.diceRollTicker !== null) {
+      clearInterval(this.diceRollTicker);
+      this.diceRollTicker = null;
+    }
+    if (this.diceFailSafeTimer !== null) {
+      clearTimeout(this.diceFailSafeTimer);
+      this.diceFailSafeTimer = null;
+    }
+    if (this.diceCompleteDelayTimer !== null) {
+      clearTimeout(this.diceCompleteDelayTimer);
+      this.diceCompleteDelayTimer = null;
+    }
+    this.localDiceRollStartedAt = null;
+    this.expectingLocalDiceAck = false;
+    this.diceHud?.setRollingShake(false);
+    const gameState = this.liveGameState;
+    const liveValues = this.turnHudBindings?.getValues?.() ?? null;
+    const lastDiceRollRaw = liveValues?.lastDiceRoll ?? gameState?.turn.lastDiceRoll;
+    this.syncDiceHudFromRollData(lastDiceRollRaw);
   }
 
   private handleRollDiceClick(): void {
     if (this.turnHudBindings?.onRollDice) {
+      this.startLocalDiceRollAnimation();
       this.turnHudBindings.onRollDice();
       this.updateTurnHud();
       return;
     }
     const roomId = getLobbySession()?.roomId ?? null;
     if (roomId) {
+      this.startLocalDiceRollAnimation();
       void rollDice(roomId);
     }
+  }
+
+  private refreshBankTradeUi(): void {
+    RESOURCE_KEYS.forEach((key) => {
+      const giveBtn = this.bankGiveButtons[key];
+      if (giveBtn) {
+        giveBtn.style.outline = this.bankGiveSelection === key ? '2px solid #22c55e' : 'none';
+        giveBtn.style.outlineOffset = '1px';
+        giveBtn.style.opacity = '1';
+      }
+
+      const receiveBtn = this.bankReceiveButtons[key];
+      if (receiveBtn) {
+        receiveBtn.style.outline = this.bankReceiveSelection === key ? '2px solid #22c55e' : 'none';
+        receiveBtn.style.outlineOffset = '1px';
+        receiveBtn.style.opacity = '1';
+      }
+    });
+
+    if (this.bankTradeButton) {
+      this.bankTradeButton.textContent =
+        `Trade 4 ${RESOURCE_LABELS[this.bankGiveSelection]} → 1 ${RESOURCE_LABELS[this.bankReceiveSelection]}`;
+    }
+  }
+
+  private canCurrentPlayerUseSelectedBankTrade(): boolean {
+    const gs = this.liveGameState ?? clientState.gameState;
+    const pid = this.livePlayerId;
+    if (!gs || !pid) {
+      return false;
+    }
+
+    const player = gs.playersById[pid];
+    if (!player) {
+      return false;
+    }
+
+    if (this.bankGiveSelection === this.bankReceiveSelection) {
+      return false;
+    }
+
+    return inventoryCount(player.resources[this.bankGiveSelection]) >= 4;
+  }
+  
+  private handleBankTradeClick(): void {
+    const roomId = getLobbySession()?.roomId ?? null;
+    if (!roomId) {
+      return;
+    }
+
+    if (this.bankGiveSelection === this.bankReceiveSelection) {
+      console.error('Bank trade failed: give and receive resource cannot be the same.');
+      return;
+    }
+
+    const gs = this.liveGameState ?? clientState.gameState;
+    const pid = this.livePlayerId;
+    if (!gs || !pid) {
+      return;
+    }
+
+    const player = gs.playersById[pid];
+    if (!player) {
+      return;
+    }
+
+    if (inventoryCount(player.resources[this.bankGiveSelection]) < 4) {
+      console.error(`Bank trade failed: need at least 4 ${RESOURCE_LABELS[this.bankGiveSelection]}.`);
+      return;
+    }
+
+    void bankTrade({
+      gameId: roomId,
+      giveResource: this.bankGiveSelection,
+      receiveResource: this.bankReceiveSelection,
+    }).catch((error) => {
+      console.error('Bank trade failed:', error);
+    });
   }
 
   private handleEndTurnClick(): void {
@@ -1158,18 +1619,222 @@ export class GameBoardScreen {
     this.musicToggleButton.setAttribute('aria-label', isEnabled ? 'Stop music' : 'Start music');
   }
 
+  private toggleGameSettingsPanel(): void {
+    if (!this.gameSettingsBackdrop || this.gameSettingsBackdrop.style.display === 'none') {
+      this.openGameSettingsPanel();
+    } else {
+      this.closeGameSettingsPanel();
+    }
+  }
+
+  private openGameSettingsPanel(): void {
+    this.ensureGameSettingsPanel();
+    if (!this.gameSettingsBackdrop) {
+      return;
+    }
+    this.syncGameSettingsPanelSliders();
+    this.gameSettingsBackdrop.style.display = 'flex';
+    this.bindGameSettingsKeydown();
+  }
+
+  private closeGameSettingsPanel(): void {
+    if (this.gameSettingsBackdrop) {
+      this.gameSettingsBackdrop.style.display = 'none';
+    }
+    this.unbindGameSettingsKeydown();
+  }
+
+  private bindGameSettingsKeydown(): void {
+    if (this.gameSettingsKeydown) {
+      return;
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        this.closeGameSettingsPanel();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    this.gameSettingsKeydown = onKey;
+  }
+
+  private unbindGameSettingsKeydown(): void {
+    if (this.gameSettingsKeydown) {
+      document.removeEventListener('keydown', this.gameSettingsKeydown);
+      this.gameSettingsKeydown = null;
+    }
+  }
+
+  private syncGameSettingsPanelSliders(): void {
+    const s = loadSettings();
+    if (this.gameSettingsBoardMusicRange) {
+      this.gameSettingsBoardMusicRange.value = String(s.boardMusicVolume);
+    }
+    if (this.gameSettingsBoardMusicValueEl) {
+      this.gameSettingsBoardMusicValueEl.textContent = `${s.boardMusicVolume}%`;
+    }
+    if (this.gameSettingsGameSfxRange) {
+      this.gameSettingsGameSfxRange.value = String(s.gameSfxVolume);
+    }
+    if (this.gameSettingsGameSfxValueEl) {
+      this.gameSettingsGameSfxValueEl.textContent = `${s.gameSfxVolume}%`;
+    }
+  }
+
+  private applyGameSettingsPartial(partial: Partial<GameSettings>): void {
+    saveSettings({ ...loadSettings(), ...partial });
+  }
+
+  private ensureGameSettingsPanel(): void {
+    if (this.gameSettingsBackdrop) {
+      return;
+    }
+
+    const backdrop = document.createElement('div');
+    backdrop.style.display = 'none';
+    backdrop.style.position = 'fixed';
+    backdrop.style.inset = '0';
+    backdrop.style.zIndex = '100';
+    backdrop.style.background = 'rgba(15, 23, 42, 0.65)';
+    backdrop.style.alignItems = 'center';
+    backdrop.style.justifyContent = 'center';
+    backdrop.style.padding = '16px';
+
+    const panel = document.createElement('div');
+    panel.className = 'font-hexahaven-ui';
+    panel.style.maxWidth = '380px';
+    panel.style.width = '100%';
+    panel.style.background = 'rgba(15, 23, 42, 0.96)';
+    panel.style.border = '1px solid rgba(255, 255, 255, 0.25)';
+    panel.style.borderRadius = '12px';
+    panel.style.padding = '20px';
+    panel.style.boxShadow = '0 20px 50px rgba(0,0,0,0.45)';
+    panel.addEventListener('click', (e) => e.stopPropagation());
+
+    const title = document.createElement('h2');
+    title.style.margin = '0 0 12px 0';
+    title.style.fontSize = '18px';
+    title.style.fontWeight = '700';
+    title.style.color = '#ffffff';
+    title.textContent = 'Audio';
+
+    const row1 = this.createGameSettingsSliderRow('Board music', (range, valueEl) => {
+      this.gameSettingsBoardMusicRange = range;
+      this.gameSettingsBoardMusicValueEl = valueEl;
+      range.addEventListener('input', () => {
+        const v = Math.max(0, Math.min(100, Math.round(Number(range.value))));
+        valueEl.textContent = `${v}%`;
+        this.applyGameSettingsPartial({ boardMusicVolume: v });
+      });
+    });
+
+    const row2 = this.createGameSettingsSliderRow('Game sounds', (range, valueEl) => {
+      this.gameSettingsGameSfxRange = range;
+      this.gameSettingsGameSfxValueEl = valueEl;
+      range.addEventListener('input', () => {
+        const v = Math.max(0, Math.min(100, Math.round(Number(range.value))));
+        valueEl.textContent = `${v}%`;
+        this.applyGameSettingsPartial({ gameSfxVolume: v });
+      });
+    });
+
+    const closeRow = document.createElement('div');
+    closeRow.style.marginTop = '16px';
+    closeRow.style.display = 'flex';
+    closeRow.style.justifyContent = 'flex-end';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.textContent = 'Done';
+    closeBtn.style.padding = '8px 16px';
+    closeBtn.style.fontSize = '14px';
+    closeBtn.style.fontWeight = '600';
+    closeBtn.style.color = '#ffffff';
+    closeBtn.style.background = 'rgba(51, 65, 85, 0.95)';
+    closeBtn.style.border = '1px solid rgba(255, 255, 255, 0.35)';
+    closeBtn.style.borderRadius = '8px';
+    closeBtn.style.cursor = 'pointer';
+    closeBtn.addEventListener('click', () => this.closeGameSettingsPanel());
+
+    closeRow.appendChild(closeBtn);
+
+    panel.appendChild(title);
+    panel.appendChild(row1);
+    panel.appendChild(row2);
+    panel.appendChild(closeRow);
+
+    backdrop.appendChild(panel);
+    backdrop.addEventListener('click', () => this.closeGameSettingsPanel());
+
+    document.body.appendChild(backdrop);
+    this.gameSettingsBackdrop = backdrop;
+  }
+
+  private createGameSettingsSliderRow(
+    label: string,
+    wire: (range: HTMLInputElement, valueEl: HTMLElement) => void,
+  ): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.style.marginBottom = '12px';
+
+    const top = document.createElement('div');
+    top.style.display = 'flex';
+    top.style.justifyContent = 'space-between';
+    top.style.alignItems = 'baseline';
+    top.style.marginBottom = '6px';
+
+    const lab = document.createElement('span');
+    lab.style.fontSize = '13px';
+    lab.style.fontWeight = '600';
+    lab.style.color = '#fde68a';
+    lab.textContent = label;
+
+    const valueEl = document.createElement('span');
+    valueEl.style.fontSize = '13px';
+    valueEl.style.color = '#e2e8f0';
+    valueEl.textContent = '100%';
+
+    top.appendChild(lab);
+    top.appendChild(valueEl);
+
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = '0';
+    range.max = '100';
+    range.step = '5';
+    range.setAttribute('aria-label', label);
+    range.className = 'w-full h-2 cursor-pointer accent-sky-500 rounded-full bg-slate-700/80';
+    range.style.width = '100%';
+
+    wire(range, valueEl);
+
+    wrap.appendChild(top);
+    wrap.appendChild(range);
+    return wrap;
+  }
+
   destroy(): void {
     this.dismissBuildRecipePopover();
+    this.closeGameSettingsPanel();
+    if (this.gameSettingsBackdrop) {
+      this.gameSettingsBackdrop.remove();
+      this.gameSettingsBackdrop = null;
+    }
+    this.gameSettingsBoardMusicRange = null;
+    this.gameSettingsBoardMusicValueEl = null;
+    this.gameSettingsGameSfxRange = null;
+    this.gameSettingsGameSfxValueEl = null;
     window.removeEventListener(SETTINGS_CHANGED_EVENT, this.onSettingsChanged);
     this.stopBackgroundMusic();
     if (this.unsubscribe) {
       this.unsubscribe();
       this.unsubscribe = null;
     }
-    if (this.exitButton) {
-      this.exitButton.remove();
-      this.exitButton = null;
+    if (this.topRightContainer) {
+      this.topRightContainer.remove();
+      this.topRightContainer = null;
     }
+    this.exitButton = null;
+    this.settingsButton = null;
     if (this.musicToggleButton) {
       this.musicToggleButton.remove();
       this.musicToggleButton = null;
@@ -1184,16 +1849,36 @@ export class GameBoardScreen {
     }
     this.resourceBarLeft = null;
     this.resourceBarRight = null;
+    this.cancelLocalDiceRollAnimation();
+    this.stopTurnTimerTicker();
+    if (this.diceHudPanel) {
+      this.diceHudPanel.remove();
+      this.diceHudPanel = null;
+    }
     if (this.turnHudPanel) {
       this.turnHudPanel.remove();
       this.turnHudPanel = null;
     }
     this.currentPlayerValue = null;
     this.currentPhaseValue = null;
-    this.lastDiceRollValue = null;
+    this.turnTimerValue = null;
+    this.diceHud = null;
     this.rollDiceButton = null;
     this.endTurnButton = null;
+    this.bankTradeButton = null;
+    this.bankGiveButtons = {};
+    this.bankReceiveButtons = {};
+    this.bankGiveSelection = 'EMBER';
+    this.bankReceiveSelection = 'STONE';
     this.buttonContainer = null;
+    if (this.chatPanel) {
+      this.chatPanel.remove();
+      this.chatPanel = null;
+    }
+    this.chatMessagesContainer = null;
+    this.chatInput = null;
+    this.statusChatLog = [];
+    this.lastStatusLogKey = null;
     this.mapScreen?.destroy();
     this.mapScreen = null;
     this.liveGameState = null;

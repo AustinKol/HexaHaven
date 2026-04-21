@@ -9,7 +9,7 @@ import { RulesScreen } from '../screens/RulesScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { TestMapGenScreen } from '../screens/TestMapGenScreen';
 import { WaitingRoomScreen } from '../screens/WaitingRoomScreen';
-import { WatchGameScreen } from '../screens/WatchGameScreen';
+import { getLobbySession } from '../state/lobbyState';
 import { getScreen, registerScreen } from './ScreenRegistry';
 
 interface AppScreen {
@@ -33,7 +33,6 @@ export class App {
     registerScreen('main-menu', new MainMenuScreen());
     registerScreen('host-game', new HostGameScreen());
     registerScreen('join-game', new JoinGameScreen());
-    registerScreen('watch-game', new WatchGameScreen());
     registerScreen('waiting-room', new WaitingRoomScreen());
     registerScreen('game-board', new GameBoardScreen());
     registerScreen('settings', new SettingsScreen());
@@ -43,7 +42,11 @@ export class App {
 
   start(): void {
     this.root.dataset.ready = 'true';
-    // Start with entry screen, transition to main menu after loading
+    const existingSession = getLobbySession();
+    if (existingSession) {
+      this.showScreen(ScreenIds.WaitingRoom);
+      return;
+    }
     this.showScreen('entry', () => this.showScreen('main-menu'));
   }
 

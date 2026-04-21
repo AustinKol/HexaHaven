@@ -22,6 +22,7 @@ export function registerClientEvents(socket: Socket<ServerToClientEvents, Client
   });
 
   socket.on('GAME_STATE_UPDATE', (gameState) => {
+    console.log('[Client Socket] Received GAME_STATE_UPDATE. Chat messages count:', gameState.chatMessages?.length);
     setClientState({ gameState });
   });
 

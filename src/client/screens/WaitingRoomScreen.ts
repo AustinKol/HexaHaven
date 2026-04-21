@@ -1,7 +1,7 @@
 import { ScreenId } from '../../shared/constants/screenIds';
 import type { GameState } from '../../shared/types/domain';
-import { connectSocket, disconnectSocket, startGame } from '../networking/socketClient';
-import { subscribeClientState } from '../state/clientState';
+import { connectSocket, disconnectSocket, hydrateSession, startGame } from '../networking/socketClient';
+import { resetClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
 import { createMusicToggleButton } from '../ui/musicToggleButton';
 
@@ -70,12 +70,12 @@ export class WaitingRoomScreen {
     leaveButton.textContent = 'Leave';
     leaveButton.addEventListener('click', async () => {
       try {
-        // Friday slice: local cleanup only.
         disconnectSocket();
       } catch (error) {
         console.error('Leave request failed:', error);
       } finally {
         clearLobbySession();
+        resetClientState();
         this.navigate?.(ScreenId.MainMenu);
       }
     });
@@ -162,6 +162,9 @@ export class WaitingRoomScreen {
     });
 
     connectSocket({ gameId: session.roomId, playerId: session.playerId });
+    void hydrateSession(session.roomId).catch((error) => {
+      console.error('Failed to hydrate waiting-room session:', error);
+    });
     this.unsubscribe = subscribeClientState((state) => {
       const gameState = state.gameState;
       if (!gameState) {

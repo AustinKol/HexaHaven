@@ -1,70 +1,40 @@
 import type { Server, Socket } from 'socket.io';
-import { defaultStartingResourceBundle } from '../../shared/constants/startingResources';
 import { CLIENT_EVENTS, SERVER_EVENTS, SocketEvents } from '../../shared/constants/socketEvents';
-import type { GameState, PlayerStats, ResourceBundle } from '../../shared/types/domain';
+import type { GameState } from '../../shared/types/domain';
 import type {
   AckError,
+  BankTradeRequest,
+  BuildStructureRequest,
   ClientToServerEvents,
-  CreateGameRequest,
-  ServerToClientEvents,
-  SocketAck,
   CreateGameAckData,
+  CreateGameRequest,
+  EndTurnRequest,
+  HydrateSessionRequest,
   JoinGameAckData,
+  JoinGameRequest,
+  RollDiceRequest,
+  SendChatMessageRequest,
+  ServerToClientEvents,
   SimpleActionAckData,
+  SocketAck,
+  StartGameRequest,
 } from '../../shared/types/socket';
-import { GameEngine } from '../engine/GameEngine';
-import type { Room } from '../sessions/Room';
-import { roomManager } from '../sessions/roomManagerSingleton';
+import { gamePersistenceService } from '../persistence/GamePersistenceService';
 import { logger } from '../utils/logger';
 
+type TypedServer = Server<ClientToServerEvents, ServerToClientEvents>;
 type TypedSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
 type SimpleActionAck = (response: SocketAck<SimpleActionAckData>) => void;
 type CreateOrJoinAck<T extends CreateGameAckData | JoinGameAckData> = (response: SocketAck<T>) => void;
 
-const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#F7B801'] as const;
-
-const EMPTY_STATS: PlayerStats = {
-  publicVP: 0,
-  settlementsBuilt: 0,
-  citiesBuilt: 0,
-  roadsBuilt: 0,
-  totalResourcesCollected: 0,
-  totalResourcesSpent: 0,
-  longestRoadLength: 0,
-  turnsPlayed: 0,
-};
-
-function cloneStats(): PlayerStats {
-  return { ...EMPTY_STATS };
+interface SocketSession {
+  gameId: string;
+  roomCode: string;
+  playerId: string;
 }
 
-function resolvePlayerCount(requestedCount: unknown): number | null {
-  // Friday scope: allow only small player counts to simplify UI/room mgmt.
-  if (typeof requestedCount !== 'number' || !Number.isFinite(requestedCount)) {
-    return null;
-  }
-  const rounded = Math.trunc(requestedCount);
-  if (rounded < 2 || rounded > 4) {
-    return null;
-  }
-  return rounded;
-}
-
-function mapRoomResourcesToBundle(resources: {
-  ember: number;
-  gold: number;
-  stone: number;
-  bloom: number;
-  crystal: number;
-}): ResourceBundle {
-  return {
-    CRYSTAL: resources.crystal,
-    STONE: resources.stone,
-    BLOOM: resources.bloom,
-    EMBER: resources.ember,
-    GOLD: resources.gold,
-  };
-}
+const socketPlayerMap = new Map<string, SocketSession>();
+const activeGameIds = new Set<string>();
 
 function normalizeId(rawValue: unknown): string | null {
   if (typeof rawValue === 'string') {
@@ -79,535 +49,578 @@ function normalizeId(rawValue: unknown): string | null {
   return null;
 }
 
-function createFallbackCreateGameRequest(room: Room): CreateGameRequest {
-  return {
-    displayName: room.players[0]?.name ?? 'Host',
-    config: {
-      playerCount: room.maxPlayers,
-      goalCount: 0,
-      winRule: 'ALL_GOALS_COMPLETE',
-      mapSeed: 0,
-      mapSize: 'small',
-      timerEnabled: false,
-      turnTimeSec: null,
-      allowReroll: false,
-      startingResources: defaultStartingResourceBundle(),
-    },
-  };
-}
-
-function buildInitialGameStateFromRoom(room: Room, request: CreateGameRequest): GameState {
-  const nowIso = new Date().toISOString();
-  const playerOrder = room.players.map((player) => player.id);
-  const playersById = Object.fromEntries(
-    room.players.map((player, index) => [
-      player.id,
-      {
-        playerId: player.id,
-        userId: player.id,
-        displayName: player.name,
-        avatarUrl: player.avatar,
-        color: PLAYER_COLORS[index % PLAYER_COLORS.length],
-        isHost: player.id === room.hostId,
-        resources: mapRoomResourcesToBundle(player.resources),
-        goals: [],
-        stats: cloneStats(),
-        presence: {
-          isConnected: true,
-          lastSeenAt: nowIso,
-          connectionId: '',
-        },
-        joinedAt: nowIso,
-        updatedAt: nowIso,
-      },
-    ]),
-  );
-
-  return {
-    gameId: room.id,
-    roomCode: room.id,
-    roomStatus: room.status,
-    createdBy: room.hostId,
-    createdAt: nowIso,
-    updatedAt: nowIso,
-    isDeleted: false,
-    winnerPlayerId: null,
-    config: {
-      ...request.config,
-    },
-    playerOrder,
-    playersById,
-    board: {
-      tilesById: {},
-      structuresById: {},
-    },
-    turn: {
-      currentTurn: 0,
-      currentPlayerId: null,
-      currentPlayerIndex: null,
-      phase: null,
-      turnStartedAt: null,
-      turnEndsAt: null,
-      lastDiceRoll: null,
-    },
-  };
-}
-
-function resolvePlayerId(socket: TypedSocket, gameState: GameState): string | null {
-  const socketPlayerId = normalizeId((socket.data as Record<string, unknown>).playerId);
-  if (socketPlayerId !== null && gameState.playersById[socketPlayerId]) {
-    return socketPlayerId;
+function resolvePlayerCount(requestedCount: unknown): number | null {
+  if (typeof requestedCount !== 'number' || !Number.isFinite(requestedCount)) {
+    return null;
   }
 
-  const authPlayerId = normalizeId((socket.handshake.auth as Record<string, unknown>).playerId);
-  if (authPlayerId !== null && gameState.playersById[authPlayerId]) {
-    return authPlayerId;
+  const rounded = Math.trunc(requestedCount);
+  if (rounded < 2 || rounded > 4) {
+    return null;
   }
 
-  const queryPlayerId = normalizeId((socket.handshake.query as Record<string, unknown>).playerId);
-  if (queryPlayerId !== null && gameState.playersById[queryPlayerId]) {
-    return queryPlayerId;
+  return rounded;
+}
+
+function buildAckError(
+  code: AckError['code'],
+  message: string,
+  details?: Record<string, unknown>,
+): AckError {
+  const error: AckError = { code, message };
+  if (details !== undefined) {
+    error.details = details;
+  }
+  return error;
+}
+
+function resolveErrorCode(message: string): AckError['code'] {
+  const normalized = message.toLowerCase();
+
+  if (
+    normalized.includes('display name')
+    || normalized.includes('join code')
+    || normalized.includes('game id is required')
+    || normalized.includes('invalid player count')
+    || normalized.includes('invalid resource type')
+    || normalized.includes('invalid road location')
+    || normalized.includes('invalid settlement location')
+    || normalized.includes('invalid city location')
+    || normalized.includes('occupied')
+    || normalized.includes('upgrade your own settlement')
+    || normalized.includes('connect to one of your existing roads or structures')
+    || normalized.includes('must be different')
+    || normalized.includes('cannot be empty')
+    || normalized.includes('need at least 2 players')
+  ) {
+    return 'INVALID_CONFIGURATION';
   }
 
-  return null;
+  if (normalized.includes('full')) {
+    return 'PLAYER_CAPACITY_EXCEEDED';
+  }
+
+  if (normalized.includes('host')) {
+    return 'NOT_HOST';
+  }
+
+  if (normalized.includes('active player')) {
+    return 'NOT_ACTIVE_PLAYER';
+  }
+
+  if (
+    normalized.includes('phase')
+    || normalized.includes('active game')
+    || normalized.includes('already started')
+    || normalized.includes('accepting new players')
+  ) {
+    return 'INVALID_PHASE';
+  }
+
+  if (normalized.includes('need 4') || normalized.includes('insufficient')) {
+    return 'INSUFFICIENT_RESOURCES';
+  }
+
+  if (
+    normalized.includes('not found')
+    || normalized.includes('no game found')
+    || normalized.includes('game not found')
+    || normalized.includes('player not found')
+  ) {
+    return 'SESSION_NOT_FOUND';
+  }
+
+  return 'INTERNAL_ERROR';
 }
 
-function resolveRawPlayerId(socket: TypedSocket): string | null {
-  return normalizeId((socket.data as Record<string, unknown>).playerId)
-    ?? normalizeId((socket.handshake.auth as Record<string, unknown>).playerId)
-    ?? normalizeId((socket.handshake.query as Record<string, unknown>).playerId);
-}
-
-function rejectAction(socket: TypedSocket, ack: SimpleActionAck, error: AckError): void {
+function emitActionRejected(socket: TypedSocket, error: AckError): void {
   socket.emit(SERVER_EVENTS.ACTION_REJECTED, {
     code: error.code,
     message: error.message,
     details: error.details,
   });
-  ack({ ok: false, error });
+}
+
+function rejectAction(
+  socket: TypedSocket,
+  ack: SimpleActionAck,
+  code: AckError['code'],
+  message: string,
+  details?: Record<string, unknown>,
+): void {
+  const error = buildAckError(code, message, details);
+  emitActionRejected(socket, error);
+  if (typeof ack === 'function') {
+    ack({ ok: false, error });
+  }
 }
 
 function rejectCreateOrJoin<T extends CreateGameAckData | JoinGameAckData>(
   socket: TypedSocket,
   ack: CreateOrJoinAck<T>,
-  error: AckError,
+  code: AckError['code'],
+  message: string,
+  details?: Record<string, unknown>,
 ): void {
-  socket.emit(SERVER_EVENTS.ACTION_REJECTED, {
-    code: error.code,
-    message: error.message,
-    details: error.details,
-  });
-  ack({ ok: false, error });
+  const error = buildAckError(code, message, details);
+  emitActionRejected(socket, error);
+  if (typeof ack === 'function') {
+    ack({ ok: false, error });
+  }
 }
 
 function completeAction(
-  io: Server<ClientToServerEvents, ServerToClientEvents>,
+  io: TypedServer,
   gameId: string,
   gameState: GameState,
   ack: SimpleActionAck,
 ): void {
   io.to(gameId).emit(SERVER_EVENTS.GAME_STATE_UPDATE, gameState);
-  ack({ ok: true, data: { gameState } });
+  if (typeof ack === 'function') {
+    ack({ ok: true, data: { gameState } });
+  }
 }
 
 function completeCreateOrJoin<T extends CreateGameAckData | JoinGameAckData>(
-  io: Server<ClientToServerEvents, ServerToClientEvents>,
+  io: TypedServer,
   gameId: string,
   payload: T,
   ack: CreateOrJoinAck<T>,
 ): void {
   io.to(gameId).emit(SERVER_EVENTS.GAME_STATE_UPDATE, payload.gameState);
-  ack({ ok: true, data: payload });
+  if (typeof ack === 'function') {
+    ack({ ok: true, data: payload });
+  }
 }
 
-export function registerSocketHandlers(
-  io: Server<ClientToServerEvents, ServerToClientEvents>,
-): void {
-  const gameEngine = new GameEngine();
+function completeSync(socket: TypedSocket, ack: SimpleActionAck, gameState: GameState): void {
+  socket.emit(SERVER_EVENTS.GAME_STATE_UPDATE, gameState);
+  if (typeof ack === 'function') {
+    ack({ ok: true, data: { gameState } });
+  }
+}
 
-  io.on(SocketEvents.Connection, (socket) => {
-    const handshakeGameId = normalizeId((socket.handshake.auth as Record<string, unknown>).gameId)
-      ?? normalizeId((socket.handshake.query as Record<string, unknown>).gameId);
-    if (handshakeGameId !== null) {
-      socket.join(handshakeGameId);
+function rememberSocketSession(
+  socket: TypedSocket,
+  gameState: GameState,
+  playerId: string,
+): SocketSession {
+  const existingSession = socketPlayerMap.get(socket.id);
+  if (existingSession && existingSession.gameId !== gameState.gameId) {
+    socket.leave(existingSession.gameId);
+  }
+
+  const session: SocketSession = {
+    gameId: gameState.gameId,
+    roomCode: gameState.roomCode,
+    playerId,
+  };
+
+  socket.join(gameState.gameId);
+  socketPlayerMap.set(socket.id, session);
+  activeGameIds.add(gameState.gameId);
+
+  const socketData = socket.data as Record<string, unknown>;
+  socketData.gameId = gameState.gameId;
+  socketData.roomCode = gameState.roomCode;
+  socketData.playerId = playerId;
+  void gamePersistenceService.markPlayerConnected(gameState.gameId, playerId, socket.id);
+
+  return session;
+}
+
+function sessionMatchesIdentifier(session: SocketSession, identifier: string): boolean {
+  return identifier === session.gameId || identifier.toUpperCase() === session.roomCode;
+}
+
+function resolveRawPlayerId(socket: TypedSocket): string | null {
+  return socketPlayerMap.get(socket.id)?.playerId
+    ?? normalizeId((socket.data as Record<string, unknown>).playerId)
+    ?? normalizeId((socket.handshake.auth as Record<string, unknown>).playerId)
+    ?? normalizeId((socket.handshake.query as Record<string, unknown>).playerId);
+}
+
+async function resolveSocketSession(
+  socket: TypedSocket,
+  requestedIdentifier: string,
+): Promise<SocketSession | null> {
+  const mappedSession = socketPlayerMap.get(socket.id);
+  if (mappedSession && sessionMatchesIdentifier(mappedSession, requestedIdentifier)) {
+    return mappedSession;
+  }
+
+  const playerId = resolveRawPlayerId(socket);
+  if (playerId === null) {
+    return null;
+  }
+
+  const gameState = await gamePersistenceService.getGameState(requestedIdentifier);
+  if (!gameState || !gameState.playersById[playerId]) {
+    return null;
+  }
+
+  return rememberSocketSession(socket, gameState, playerId);
+}
+
+async function restoreSocketSessionFromHandshake(socket: TypedSocket): Promise<void> {
+  const handshakeIdentifier = normalizeId((socket.handshake.auth as Record<string, unknown>).gameId)
+    ?? normalizeId((socket.handshake.query as Record<string, unknown>).gameId);
+
+  if (handshakeIdentifier === null) {
+    return;
+  }
+
+  try {
+    const session = await resolveSocketSession(socket, handshakeIdentifier);
+    if (session !== null) {
+      const gameState = await gamePersistenceService.getGameState(session.gameId);
+      if (gameState) {
+        socket.emit(SERVER_EVENTS.GAME_STATE_UPDATE, gameState);
+      }
+      logger.info(`Socket ${socket.id} restored session for ${session.gameId}`);
     }
+  } catch (error) {
+    logger.warn(`Failed to restore socket session for ${socket.id}: ${(error as Error).message}`);
+  }
+}
 
-    const handshakePlayerId = normalizeId((socket.handshake.auth as Record<string, unknown>).playerId)
-      ?? normalizeId((socket.handshake.query as Record<string, unknown>).playerId);
-    if (handshakePlayerId !== null) {
-      (socket.data as Record<string, unknown>).playerId = handshakePlayerId;
+export function registerSocketHandlers(io: TypedServer): void {
+  let timeoutPollInFlight = false;
+  setInterval(() => {
+    if (timeoutPollInFlight || activeGameIds.size === 0) {
+      return;
     }
-
-    logger.info(`Client connected: ${socket.id}`);
-
-    socket.on(CLIENT_EVENTS.CREATE_GAME, (request, ack) => {
-      const displayName = typeof request.displayName === 'string' ? request.displayName.trim() : '';
-      const playerCount = resolvePlayerCount(request.config.playerCount);
-
-      if (!displayName) {
-        rejectCreateOrJoin(socket, ack, { code: 'INVALID_CONFIGURATION', message: 'Display name is required.' });
-        return;
-      }
-      if (playerCount === null) {
-        rejectCreateOrJoin(socket, ack, { code: 'INVALID_CONFIGURATION', message: 'Invalid player count.' });
-        return;
-      }
-
-      const { room, player } = roomManager.createRoom(displayName, playerCount);
-      const gameId = room.id.toUpperCase();
-      room.id = gameId;
-
-      // Normalize stored room key casing.
-      // RoomManager currently stores by generated id, so we need the room keyed with upper-case id.
-      // Easiest for Friday: create a second entry if necessary.
-      // (This keeps join codes predictable for the UI.)
-      if (roomManager.getRoom(gameId) === null) {
-        // If the manager stored it under a different casing, best-effort: remove old + re-add by touching internal map is not possible.
-        // For Friday slice, generated ids are already uppercase; this should be a no-op.
-      }
-
-      socket.join(gameId);
-      (socket.data as Record<string, unknown>).playerId = player.id;
-
-      const gameState = roomManager.initializeGameState(gameId, buildInitialGameStateFromRoom(room, request));
-      if (!gameState) {
-        rejectCreateOrJoin(socket, ack, { code: 'INTERNAL_ERROR', message: 'Unable to initialize game state.' });
-        return;
-      }
-
-      const payload: CreateGameAckData = {
-        clientId: socket.id,
-        playerId: player.id,
-        role: 'PLAYER',
-        gameState,
-      };
-      completeCreateOrJoin(io, gameId, payload, ack);
-    });
-
-    socket.on(CLIENT_EVENTS.JOIN_GAME, (request, ack) => {
-      const joinCode = typeof request.joinCode === 'string' ? request.joinCode.trim().toUpperCase() : '';
-      const displayName = typeof request.displayName === 'string' ? request.displayName.trim() : '';
-
-      if (!joinCode) {
-        rejectCreateOrJoin(socket, ack, { code: 'INVALID_CONFIGURATION', message: 'Join code is required.' });
-        return;
-      }
-      if (!displayName) {
-        rejectCreateOrJoin(socket, ack, { code: 'INVALID_CONFIGURATION', message: 'Display name is required.' });
-        return;
-      }
-
-      const room = roomManager.getRoom(joinCode);
-      if (!room) {
-        rejectCreateOrJoin(socket, ack, { code: 'SESSION_NOT_FOUND', message: 'Session not found for JOIN_GAME.' });
-        return;
-      }
-      if (room.status !== 'waiting') {
-        rejectCreateOrJoin(socket, ack, { code: 'INVALID_PHASE', message: 'Cannot join a game that has already started.' });
-        return;
-      }
-      if (room.players.length >= room.maxPlayers) {
-        rejectCreateOrJoin(socket, ack, { code: 'PLAYER_CAPACITY_EXCEEDED', message: 'Room is full.' });
-        return;
-      }
-
-      const joined = roomManager.joinRoom(joinCode, displayName);
-      if (!joined) {
-        rejectCreateOrJoin(socket, ack, { code: 'INTERNAL_ERROR', message: 'Unable to join room.' });
-        return;
-      }
-
-      socket.join(joinCode);
-      (socket.data as Record<string, unknown>).playerId = joined.player.id;
-
-      const existingGameState = roomManager.getGameState(joinCode);
-      const gameState = roomManager.setGameState(
-        joinCode,
-        existingGameState
-          ? {
-            ...existingGameState,
-            updatedAt: new Date().toISOString(),
-            playerOrder: joined.room.players.map((player) => player.id),
-            playersById: Object.fromEntries(
-              joined.room.players.map((player, index) => [
-                player.id,
-                {
-                  playerId: player.id,
-                  userId: player.id,
-                  displayName: player.name,
-                  avatarUrl: player.avatar,
-                  color: PLAYER_COLORS[index % PLAYER_COLORS.length],
-                  isHost: player.id === joined.room.hostId,
-                  resources: mapRoomResourcesToBundle(player.resources),
-                  goals: [],
-                  stats: cloneStats(),
-                  presence: {
-                    isConnected: true,
-                    lastSeenAt: new Date().toISOString(),
-                    connectionId: '',
-                  },
-                  joinedAt: new Date().toISOString(),
-                  updatedAt: new Date().toISOString(),
-                },
-              ]),
-            ),
+    timeoutPollInFlight = true;
+    void (async () => {
+      try {
+        for (const gameId of activeGameIds) {
+          const updatedGameState = await gamePersistenceService.advanceTurnIfExpired(gameId);
+          if (updatedGameState) {
+            io.to(gameId).emit(SERVER_EVENTS.GAME_STATE_UPDATE, updatedGameState);
           }
-          : buildInitialGameStateFromRoom(joined.room, {
-            displayName: joined.room.players[0]?.name ?? 'Host',
-            // If somehow joining before host initialized state, keep config minimal.
-            config: {
-              playerCount: joined.room.maxPlayers,
-              goalCount: 0,
-              winRule: 'ALL_GOALS_COMPLETE',
-              mapSeed: 0,
-              mapSize: 'small',
-              timerEnabled: false,
-              turnTimeSec: null,
-              allowReroll: false,
-              startingResources: defaultStartingResourceBundle(),
-            },
-          }),
-      );
-
-      if (!gameState) {
-        rejectCreateOrJoin(socket, ack, { code: 'INTERNAL_ERROR', message: 'Unable to store game state for JOIN_GAME.' });
-        return;
+        }
+      } catch (error) {
+        logger.warn(`Turn timeout poll failed: ${(error as Error).message}`);
+      } finally {
+        timeoutPollInFlight = false;
       }
+    })();
+  }, 1000);
 
-      const payload: JoinGameAckData = {
-        clientId: socket.id,
-        playerId: joined.player.id,
-        role: request.role,
-        gameState,
-      };
-      completeCreateOrJoin(io, joinCode, payload, ack);
-    });
+  io.on(SocketEvents.Connection, (socket: TypedSocket) => {
+    logger.info(`Client connected: ${socket.id}`);
+    void restoreSocketSessionFromHandshake(socket);
 
-    socket.on(CLIENT_EVENTS.START_GAME, (request, ack) => {
-      const normalizedGameId = normalizeId(request.gameId);
-      if (normalizedGameId === null) {
-        rejectAction(socket, ack, {
-          code: 'INVALID_CONFIGURATION',
-          message: 'Game id is required.',
-        });
-        return;
-      }
-      const gameId = normalizedGameId.toUpperCase();
+    socket.on(
+      CLIENT_EVENTS.CREATE_GAME,
+      async (
+        request: CreateGameRequest,
+        ack: CreateOrJoinAck<CreateGameAckData>,
+      ) => {
+        const displayName = typeof request.displayName === 'string' ? request.displayName.trim() : '';
+        const config = request.config;
+        const playerCount = resolvePlayerCount(config?.playerCount);
 
-      socket.join(gameId);
+        if (!displayName) {
+          rejectCreateOrJoin(socket, ack, 'INVALID_CONFIGURATION', 'Display name is required.');
+          return;
+        }
 
-      const room = roomManager.getRoom(gameId);
-      if (!room) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Session not found for START_GAME.',
-        });
-        return;
-      }
+        if (!config || playerCount === null) {
+          rejectCreateOrJoin(socket, ack, 'INVALID_CONFIGURATION', 'Invalid player count.');
+          return;
+        }
 
-      const requesterPlayerId = resolveRawPlayerId(socket);
-      if (requesterPlayerId === null) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Player session not found for START_GAME.',
-        });
-        return;
-      }
+        try {
+          const { gameState, playerId } = await gamePersistenceService.createGame(displayName, {
+            ...config,
+            playerCount,
+          });
 
-      if (requesterPlayerId !== room.hostId) {
-        rejectAction(socket, ack, {
-          code: 'NOT_HOST',
-          message: 'Only the host can start the game.',
-        });
-        return;
-      }
+          rememberSocketSession(socket, gameState, playerId);
 
-      const existingGameState = roomManager.getGameState(gameId);
-      const gameState = existingGameState
-        ?? roomManager.initializeGameState(gameId, buildInitialGameStateFromRoom(room, createFallbackCreateGameRequest(room)));
+          completeCreateOrJoin(io, gameState.gameId, {
+            clientId: socket.id,
+            playerId,
+            role: 'PLAYER',
+            gameState,
+          }, ack);
+        } catch (error) {
+          logger.error('CREATE_GAME failed:', error);
+          const message = (error as Error).message;
+          rejectCreateOrJoin(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
 
-      if (!gameState) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Unable to initialize game state for START_GAME.',
-        });
-        return;
-      }
+    socket.on(
+      CLIENT_EVENTS.JOIN_GAME,
+      async (
+        request: JoinGameRequest,
+        ack: CreateOrJoinAck<JoinGameAckData>,
+      ) => {
+        const joinCode = typeof request.joinCode === 'string' ? request.joinCode.trim().toUpperCase() : '';
+        const displayName = typeof request.displayName === 'string' ? request.displayName.trim() : '';
 
-      const engineResult = gameEngine.startGame(gameState);
-      if (!engineResult.ok) {
-        rejectAction(socket, ack, engineResult.error);
-        return;
-      }
+        if (!joinCode) {
+          rejectCreateOrJoin(socket, ack, 'INVALID_CONFIGURATION', 'Join code is required.');
+          return;
+        }
 
-      const updatedGameState: GameState = {
-        ...engineResult.gameState,
-        updatedAt: new Date().toISOString(),
-      };
+        if (!displayName) {
+          rejectCreateOrJoin(socket, ack, 'INVALID_CONFIGURATION', 'Display name is required.');
+          return;
+        }
 
-      if (!roomManager.setGameState(gameId, updatedGameState)) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Unable to store game state for START_GAME.',
-        });
-        return;
-      }
+        try {
+          const { gameState, playerId } = await gamePersistenceService.joinGame(joinCode, displayName);
 
-      room.status = updatedGameState.roomStatus;
+          rememberSocketSession(socket, gameState, playerId);
 
-      completeAction(io, gameId, updatedGameState, ack);
-    });
+          completeCreateOrJoin(io, gameState.gameId, {
+            clientId: socket.id,
+            playerId,
+            role: 'PLAYER',
+            gameState,
+          }, ack);
+        } catch (error) {
+          logger.error('JOIN_GAME failed:', error);
+          const message = (error as Error).message;
+          rejectCreateOrJoin(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
 
-    socket.on(CLIENT_EVENTS.ROLL_DICE, (request, ack) => {
-      const normalizedGameId = normalizeId(request.gameId);
-      if (normalizedGameId === null) {
-        rejectAction(socket, ack, {
-          code: 'INVALID_CONFIGURATION',
-          message: 'Game id is required.',
-        });
-        return;
-      }
-      const gameId = normalizedGameId.toUpperCase();
+    socket.on(
+      CLIENT_EVENTS.START_GAME,
+      async (
+        request: StartGameRequest,
+        ack: SimpleActionAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
 
-      const gameState = roomManager.getGameState(gameId);
-      if (!gameState) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Session not found for ROLL_DICE.',
-        });
-        return;
-      }
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for START_GAME.');
+          return;
+        }
 
-      const playerId = resolvePlayerId(socket, gameState);
-      if (playerId === null) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Player session not found for ROLL_DICE.',
-        });
-        return;
-      }
+        try {
+          const gameState = await gamePersistenceService.startGame(session.gameId, session.playerId);
+          rememberSocketSession(socket, gameState, session.playerId);
+          completeAction(io, gameState.gameId, gameState, ack);
+        } catch (error) {
+          logger.error('START_GAME failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
 
-      const engineResult = gameEngine.rollDice(gameState, playerId);
-      if (!engineResult.ok) {
-        rejectAction(socket, ack, engineResult.error);
-        return;
-      }
+    socket.on(
+      CLIENT_EVENTS.HYDRATE_SESSION,
+      async (
+        request: HydrateSessionRequest,
+        ack: SimpleActionAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
 
-      const updatedGameState: GameState = {
-        ...engineResult.gameState,
-        updatedAt: new Date().toISOString(),
-      };
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for HYDRATE_SESSION.');
+          return;
+        }
 
-      if (!roomManager.setGameState(gameId, updatedGameState)) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Unable to store game state for ROLL_DICE.',
-        });
-        return;
-      }
+        try {
+          const gameState = await gamePersistenceService.getGameState(session.gameId);
+          if (!gameState || !gameState.playersById[session.playerId]) {
+            rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Game session not found.');
+            return;
+          }
 
-      completeAction(io, gameId, updatedGameState, ack);
-    });
+          rememberSocketSession(socket, gameState, session.playerId);
+          completeSync(socket, ack, gameState);
+        } catch (error) {
+          logger.error('HYDRATE_SESSION failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
 
-    socket.on(CLIENT_EVENTS.END_TURN, (request, ack) => {
-      const normalizedGameId = normalizeId(request.gameId);
-      if (normalizedGameId === null) {
-        rejectAction(socket, ack, {
-          code: 'INVALID_CONFIGURATION',
-          message: 'Game id is required.',
-        });
-        return;
-      }
-      const gameId = normalizedGameId.toUpperCase();
+    socket.on(
+      CLIENT_EVENTS.ROLL_DICE,
+      async (
+        request: RollDiceRequest,
+        ack: SimpleActionAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
 
-      const gameState = roomManager.getGameState(gameId);
-      if (!gameState) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Session not found for END_TURN.',
-        });
-        return;
-      }
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for ROLL_DICE.');
+          return;
+        }
 
-      const playerId = resolvePlayerId(socket, gameState);
-      if (playerId === null) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Player session not found for END_TURN.',
-        });
-        return;
-      }
+        try {
+          const gameState = await gamePersistenceService.rollDice(session.gameId, session.playerId);
+          completeAction(io, gameState.gameId, gameState, ack);
+        } catch (error) {
+          logger.error('ROLL_DICE failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
 
-      const engineResult = gameEngine.endTurn(gameState, playerId);
-      if (!engineResult.ok) {
-        rejectAction(socket, ack, engineResult.error);
-        return;
-      }
+    socket.on(
+      CLIENT_EVENTS.BUILD_STRUCTURE,
+      async (
+        request: BuildStructureRequest,
+        ack: SimpleActionAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
 
-      const updatedGameState: GameState = {
-        ...engineResult.gameState,
-        updatedAt: new Date().toISOString(),
-      };
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for BUILD_STRUCTURE.');
+          return;
+        }
 
-      if (!roomManager.setGameState(gameId, updatedGameState)) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Unable to store game state for END_TURN.',
-        });
-        return;
-      }
+        try {
+          const gameState = await gamePersistenceService.buildStructure(session.gameId, session.playerId, {
+            kind: request.kind,
+            vertexId: request.vertexId,
+            edgeId: request.edgeId,
+          });
+          completeAction(io, gameState.gameId, gameState, ack);
+        } catch (error) {
+          logger.error('BUILD_STRUCTURE failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
 
-      completeAction(io, gameId, updatedGameState, ack);
-    });
+    socket.on(
+      CLIENT_EVENTS.BANK_TRADE,
+      async (
+        request: BankTradeRequest,
+        ack: SimpleActionAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
 
-    socket.on(CLIENT_EVENTS.SYNC_GAME_STATE, (request, ack) => {
-      const normalizedGameId = normalizeId((request as any).gameId);
-      if (normalizedGameId === null) {
-        rejectAction(socket, ack, {
-          code: 'INVALID_CONFIGURATION',
-          message: 'Game id is required.',
-        });
-        return;
-      }
-      const gameId = normalizedGameId.toUpperCase();
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for BANK_TRADE.');
+          return;
+        }
 
-      const gameState = roomManager.getGameState(gameId);
-      if (!gameState) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Session not found for SYNC_GAME_STATE.',
-        });
-        return;
-      }
+        try {
+          const gameState = await gamePersistenceService.bankTrade(
+            session.gameId,
+            session.playerId,
+            request.giveResource,
+            request.receiveResource,
+          );
+          completeAction(io, gameState.gameId, gameState, ack);
+        } catch (error) {
+          logger.error('BANK_TRADE failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
 
-      const playerId = resolvePlayerId(socket, gameState);
-      if (playerId === null) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Player session not found for SYNC_GAME_STATE.',
-        });
-        return;
-      }
+    socket.on(
+      CLIENT_EVENTS.END_TURN,
+      async (
+        request: EndTurnRequest,
+        ack: SimpleActionAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
 
-      const incomingState = (request as any).gameState;
-      const updatedGameState: GameState = {
-        ...incomingState,
-        updatedAt: new Date().toISOString(),
-      };
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for END_TURN.');
+          return;
+        }
 
-      if (!roomManager.setGameState(gameId, updatedGameState)) {
-        rejectAction(socket, ack, {
-          code: 'SESSION_NOT_FOUND',
-          message: 'Unable to store game state for SYNC_GAME_STATE.',
-        });
-        return;
-      }
+        try {
+          const gameState = await gamePersistenceService.endTurn(session.gameId, session.playerId);
+          completeAction(io, gameState.gameId, gameState, ack);
+        } catch (error) {
+          logger.error('END_TURN failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
 
-      completeAction(io, gameId, updatedGameState, ack);
-    });
+    socket.on(
+      CLIENT_EVENTS.SEND_CHAT_MESSAGE,
+      async (
+        request: SendChatMessageRequest,
+        ack: SimpleActionAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectAction(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
+
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectAction(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for SEND_CHAT_MESSAGE.');
+          return;
+        }
+
+        try {
+          const gameState = await gamePersistenceService.appendChatMessage(
+            session.gameId,
+            session.playerId,
+            request.message,
+          );
+          completeAction(io, gameState.gameId, gameState, ack);
+        } catch (error) {
+          logger.error('SEND_CHAT_MESSAGE failed:', error);
+          const message = (error as Error).message;
+          rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
 
     socket.on(SocketEvents.Disconnect, () => {
       logger.info(`Client disconnected: ${socket.id}`);
+      const session = socketPlayerMap.get(socket.id);
+      if (session) {
+        void gamePersistenceService.markPlayerDisconnected(session.gameId, session.playerId);
+      }
+      socketPlayerMap.delete(socket.id);
     });
   });
 }

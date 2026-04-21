@@ -1,5 +1,5 @@
 import { FieldValue } from 'firebase-admin/firestore';
-import type { RoomStatus, TurnState, GameConfig, ResourceBundle } from '../../shared/types/domain';
+import type { ChatMessage, RoomStatus, TurnState, GameConfig, ResourceBundle } from '../../shared/types/domain';
 import { FirestoreRepository } from './FirestoreRepository';
 
 // ─── Firestore document shape for /games/{gameId} ────────────────────────────
@@ -10,8 +10,6 @@ export interface GameSessionDoc {
   status: RoomStatus;
   config: GameConfig;
   playerOrder: string[];
-  /** playerId → PlayerStats map stored at the top level for quick score reads. */
-  playerStats: Record<string, { publicVP: number; settlementsBuilt: number; roadsBuilt: number; totalResourcesCollected: number; totalResourcesSpent: number; longestRoadLength: number; turnsPlayed: number }>;
   winnerPlayerId: string | null;
   createdBy: string;
   createdAt: FirebaseFirestore.Timestamp;
@@ -48,9 +46,13 @@ export class GameSessionsRepository extends FirestoreRepository {
     return this.collection().doc(gameId);
   }
 
+  private chatCol(gameId: string) {
+    return this.db.collection(`games/${gameId}/chat`);
+  }
+
   /**
    * Creates a new game document.
-   * gameId is used as both the Firestore document ID and the readable room code.
+   * gameId is the Firestore document ID; roomCode is the player-facing join code.
    */
   async createGame(params: CreateGameParams): Promise<void> {
     const now = FieldValue.serverTimestamp() as FirebaseFirestore.Timestamp;
@@ -60,7 +62,6 @@ export class GameSessionsRepository extends FirestoreRepository {
       status: 'waiting',
       config: params.config,
       playerOrder: [],
-      playerStats: {},
       winnerPlayerId: null,
       createdBy: params.createdBy,
       createdAt: now,
@@ -77,7 +78,7 @@ export class GameSessionsRepository extends FirestoreRepository {
     await this.doc(params.gameId).set(doc);
   }
 
-  /** Fetches a game by its document ID (which equals its roomCode). */
+  /** Fetches a game by its document ID. */
   async getGame(gameId: string): Promise<GameSessionDoc | null> {
     const snap = await this.doc(gameId).get();
     if (!snap.exists) return null;
@@ -138,6 +139,20 @@ export class GameSessionsRepository extends FirestoreRepository {
     });
   }
 
+  async appendChatMessage(gameId: string, chatMessage: ChatMessage): Promise<void> {
+    const batch = this.db.batch();
+    batch.set(this.chatCol(gameId).doc(chatMessage.id), chatMessage);
+    batch.update(this.doc(gameId), {
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    await batch.commit();
+  }
+
+  async getChatMessages(gameId: string): Promise<ChatMessage[]> {
+    const snap = await this.chatCol(gameId).orderBy('timestamp', 'asc').get();
+    return snap.docs.map((doc) => doc.data() as ChatMessage);
+  }
+
   /** Sets the winner and marks the game as finished. Uses a transaction to prevent duplicate writes. */
   async finalizeGame(gameId: string, winnerId: string): Promise<void> {
     await this.db.runTransaction(async (tx) => {
@@ -158,6 +173,12 @@ export class GameSessionsRepository extends FirestoreRepository {
   async softDelete(gameId: string): Promise<void> {
     await this.doc(gameId).update({
       isDeleted: true,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+  }
+
+  async touchGame(gameId: string): Promise<void> {
+    await this.doc(gameId).update({
       updatedAt: FieldValue.serverTimestamp(),
     });
   }

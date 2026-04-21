@@ -61,7 +61,6 @@ This starts:
 5. In-game, use the Turn HUD:
    - Click **Roll Dice** during your ROLL phase.
    - Click **End Turn** during your ACTION phase.
-6. Optional: use **Watch Game** to spectate with a game key.
 
 ## Useful Dev Commands
 

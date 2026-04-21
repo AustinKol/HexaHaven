@@ -3,21 +3,49 @@ import type { ClientToServerEvents, ServerToClientEvents } from '../../shared/ty
 import { ClientEnv } from '../config/env';
 import { registerClientEvents } from './registerClientEvents';
 import type {
+  BankTradeRequest,
+  BuildStructureRequest,
   CreateGameAckData,
   CreateGameRequest,
+  HydrateSessionRequest,
   JoinGameAckData,
   JoinGameRequest,
   SimpleActionAckData,
   SocketAck,
+  SendChatMessageRequest,
 } from '../../shared/types/socket';
-import { setClientState } from '../state/clientState';
+import { CLIENT_EVENTS } from '../../shared/constants/socketEvents';
+import { clientState, setClientState } from '../state/clientState';
 
 type TypedSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
 let socket: TypedSocket | null = null;
+let currentSocketAuthKey: string | null = null;
+
+function resolveSocketAuth(gameId?: string, playerId: string | null = clientState.playerId): {
+  gameId?: string;
+  playerId?: string;
+} {
+  return {
+    gameId,
+    playerId: playerId ?? undefined,
+  };
+}
 
 export function getSocket(): TypedSocket | null {
   return socket;
+}
+
+function buildSocketAuthKey(auth?: { gameId?: string; playerId?: string }): string {
+  return `${auth?.gameId ?? ''}::${auth?.playerId ?? ''}`;
+}
+
+function applyActionState(data: SimpleActionAckData): SimpleActionAckData {
+  setClientState({
+    gameState: data.gameState,
+    lastActionRejected: null,
+  });
+  return data;
 }
 
 export function disconnectSocket(): void {
@@ -26,12 +54,20 @@ export function disconnectSocket(): void {
     socket.disconnect();
     socket = null;
   }
+  currentSocketAuthKey = null;
 }
 
 export function connectSocket(auth?: { gameId?: string; playerId?: string }): TypedSocket {
-  if (socket) {
-    // If we already have a socket, keep it; screens rely on a single connection.
+  const authKey = buildSocketAuthKey(auth);
+  if (socket && currentSocketAuthKey === authKey) {
+    if (!socket.connected) {
+      socket.connect();
+    }
     return socket;
+  }
+
+  if (socket) {
+    disconnectSocket();
   }
 
   socket = io(ClientEnv.serverUrl, {
@@ -43,6 +79,7 @@ export function connectSocket(auth?: { gameId?: string; playerId?: string }): Ty
     },
   });
 
+  currentSocketAuthKey = authKey;
   registerClientEvents(socket);
   return socket;
 }
@@ -71,7 +108,7 @@ function emitWithAck<T>(
 export async function createGame(request: CreateGameRequest): Promise<CreateGameAckData> {
   const s = connectSocket();
   const data = await emitWithAck<CreateGameAckData>((ack) => {
-    s.emit('CREATE_GAME', request, ack);
+    s.emit(CLIENT_EVENTS.CREATE_GAME, request, ack);
   });
   setClientState({
     playerId: data.playerId,
@@ -79,13 +116,14 @@ export async function createGame(request: CreateGameRequest): Promise<CreateGame
     gameState: data.gameState,
     lastActionRejected: null,
   });
+  connectSocket(resolveSocketAuth(data.gameState.gameId, data.playerId));
   return data;
 }
 
 export async function joinGame(request: JoinGameRequest): Promise<JoinGameAckData> {
   const s = connectSocket({ gameId: request.joinCode });
   const data = await emitWithAck<JoinGameAckData>((ack) => {
-    s.emit('JOIN_GAME', request, ack);
+    s.emit(CLIENT_EVENTS.JOIN_GAME, request, ack);
   });
   setClientState({
     playerId: data.playerId,
@@ -93,33 +131,76 @@ export async function joinGame(request: JoinGameRequest): Promise<JoinGameAckDat
     gameState: data.gameState,
     lastActionRejected: null,
   });
+  connectSocket(resolveSocketAuth(data.gameState.gameId, data.playerId));
   return data;
 }
 
 export async function startGame(gameId: string): Promise<SimpleActionAckData> {
-  const s = connectSocket({ gameId });
-  return emitWithAck<SimpleActionAckData>((ack) => {
-    s.emit('START_GAME', { gameId }, ack);
+  const s = connectSocket(resolveSocketAuth(gameId));
+  const data = await emitWithAck<SimpleActionAckData>((ack) => {
+    s.emit(CLIENT_EVENTS.START_GAME, { gameId }, ack);
   });
+  return applyActionState(data);
+}
+
+export async function hydrateSession(gameId: string): Promise<SimpleActionAckData> {
+  const request: HydrateSessionRequest = { gameId };
+  const s = connectSocket(resolveSocketAuth(gameId));
+  const data = await emitWithAck<SimpleActionAckData>((ack) => {
+    s.emit(CLIENT_EVENTS.HYDRATE_SESSION, request, ack);
+  });
+  return applyActionState(data);
 }
 
 export async function rollDice(gameId: string): Promise<SimpleActionAckData> {
-  const s = connectSocket({ gameId });
-  return emitWithAck<SimpleActionAckData>((ack) => {
-    s.emit('ROLL_DICE', { gameId }, ack);
+  const s = connectSocket(resolveSocketAuth(gameId));
+  const data = await emitWithAck<SimpleActionAckData>((ack) => {
+    s.emit(CLIENT_EVENTS.ROLL_DICE, { gameId }, ack);
   });
+  return applyActionState(data);
+}
+
+export async function buildStructure(
+  request: BuildStructureRequest,
+): Promise<SimpleActionAckData> {
+  const s = connectSocket(resolveSocketAuth(request.gameId));
+  const data = await emitWithAck<SimpleActionAckData>((ack) => {
+    s.emit(CLIENT_EVENTS.BUILD_STRUCTURE, request, ack);
+  });
+  return applyActionState(data);
 }
 
 export async function endTurn(gameId: string): Promise<SimpleActionAckData> {
-  const s = connectSocket({ gameId });
-  return emitWithAck<SimpleActionAckData>((ack) => {
-    s.emit('END_TURN', { gameId }, ack);
+  const s = connectSocket(resolveSocketAuth(gameId));
+  const data = await emitWithAck<SimpleActionAckData>((ack) => {
+    s.emit(CLIENT_EVENTS.END_TURN, { gameId }, ack);
   });
+  return applyActionState(data);
 }
 
-export async function syncGameState(gameId: string, gameState: any): Promise<SimpleActionAckData> {
-  const s = connectSocket({ gameId });
-  return emitWithAck<SimpleActionAckData>((ack) => {
-    s.emit('SYNC_GAME_STATE', { gameId, gameState }, ack);
+export async function bankTrade(
+  request: BankTradeRequest,
+): Promise<SimpleActionAckData> {
+  const s = connectSocket(resolveSocketAuth(request.gameId));
+  const data = await emitWithAck<SimpleActionAckData>((ack) => {
+    s.emit('BANK_TRADE', request, ack);
   });
+  return applyActionState(data);
+}
+
+export async function sendChatMessage(gameId: string, message: string): Promise<void> {
+  const s = connectSocket(resolveSocketAuth(gameId));
+  try {
+    const request: SendChatMessageRequest = { gameId, message };
+    console.log(`[Client] Emitting SEND_CHAT_MESSAGE to socket ${s.id}. Connected: ${s.connected}`, request);
+    const data = await emitWithAck<SimpleActionAckData>((ack) =>
+      s.emit(CLIENT_EVENTS.SEND_CHAT_MESSAGE, request, ack),
+    );
+    console.log('[socketClient] Received gameState in sendChatMessage ack. Chat messages count:', data.gameState?.chatMessages?.length);
+
+    // Update local state immediately from the server's response
+    applyActionState(data);
+  } catch (error) {
+    console.error('Failed to send chat message:', error);
+  }
 }

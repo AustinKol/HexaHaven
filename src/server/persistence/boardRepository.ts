@@ -8,6 +8,33 @@ import { FirestoreRepository } from './FirestoreRepository';
 //   /games/{gameId}/board/state/tiles/{tileId}
 //   /games/{gameId}/board/state/structures/{structureId}
 
+function toIso(value: unknown): string {
+  if (value && typeof value === 'object' && 'toDate' in value && typeof value.toDate === 'function') {
+    return value.toDate().toISOString();
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value;
+  }
+  return new Date().toISOString();
+}
+
+function mapTileDoc(data: FirebaseFirestore.DocumentData): TileState {
+  return {
+    ...data,
+    createdAt: toIso(data.createdAt),
+  } as TileState;
+}
+
+function mapStructureDoc(data: FirebaseFirestore.DocumentData): StructureState {
+  return {
+    ...data,
+    builtAt: toIso(data.builtAt),
+  } as StructureState;
+}
+
 export class BoardRepository extends FirestoreRepository {
   private tilesCol(gameId: string) {
     return this.db.collection(`games/${gameId}/board/state/tiles`);
@@ -34,7 +61,7 @@ export class BoardRepository extends FirestoreRepository {
       for (const tile of chunk) {
         batch.set(col.doc(tile.tileId), {
           ...tile,
-          createdAt: FieldValue.serverTimestamp(),
+          createdAt: tile.createdAt ? new Date(tile.createdAt) : FieldValue.serverTimestamp(),
         });
       }
       await batch.commit();
@@ -46,7 +73,7 @@ export class BoardRepository extends FirestoreRepository {
     const snap = await this.tilesCol(gameId).get();
     const tilesById: Record<string, TileState> = {};
     for (const doc of snap.docs) {
-      const tile = doc.data() as TileState;
+      const tile = mapTileDoc(doc.data());
       tilesById[tile.tileId] = tile;
     }
     return tilesById;
@@ -58,7 +85,7 @@ export class BoardRepository extends FirestoreRepository {
   async upsertStructure(gameId: string, structure: StructureState): Promise<void> {
     await this.structuresCol(gameId).doc(structure.structureId).set({
       ...structure,
-      builtAt: FieldValue.serverTimestamp(),
+      builtAt: structure.builtAt ? new Date(structure.builtAt) : FieldValue.serverTimestamp(),
     });
   }
 
@@ -76,7 +103,7 @@ export class BoardRepository extends FirestoreRepository {
     const snap = await this.structuresCol(gameId).get();
     const structuresById: Record<string, StructureState> = {};
     for (const doc of snap.docs) {
-      const s = doc.data() as StructureState;
+      const s = mapStructureDoc(doc.data());
       structuresById[s.structureId] = s;
     }
     return structuresById;
@@ -88,7 +115,7 @@ export class BoardRepository extends FirestoreRepository {
    */
   async getStructuresByOwner(gameId: string, ownerPlayerId: string): Promise<StructureState[]> {
     const snap = await this.structuresCol(gameId).where('ownerPlayerId', '==', ownerPlayerId).get();
-    return snap.docs.map((d) => d.data() as StructureState);
+    return snap.docs.map((d) => mapStructureDoc(d.data()));
   }
 }
 
