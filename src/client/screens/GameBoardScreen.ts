@@ -178,6 +178,8 @@ export class GameBoardScreen {
   private gameSettingsGameSfxRange: HTMLInputElement | null = null;
   private gameSettingsGameSfxValueEl: HTMLElement | null = null;
   private gameSettingsKeydown: ((e: KeyboardEvent) => void) | null = null;
+  private gameRulesBackdrop: HTMLDivElement | null = null;
+  private gameRulesKeydown: ((e: KeyboardEvent) => void) | null = null;
   private topRightContainer: HTMLElement | null = null;
   private playerPanel: HTMLDivElement | null = null;
   private resourceBar: HTMLDivElement | null = null;
@@ -207,7 +209,7 @@ export class GameBoardScreen {
   private chatPanel: HTMLDivElement | null = null;
   private chatMessagesContainer: HTMLDivElement | null = null;
   private chatInput: HTMLInputElement | null = null;
-  private statusChatLog: { timestampMs: number; text: string }[] = [];
+  private statusChatLog: { timestampMs: number; text: string; activePlayerId: string | null }[] = [];
   private lastStatusLogKey: string | null = null;
   private bankTradeButton: HTMLButtonElement | null = null;
   private endTurnButton: HTMLButtonElement | null = null;
@@ -804,10 +806,37 @@ export class GameBoardScreen {
 
   private refreshPlayerUi(): void {
     this.renderPlayerCardsFromGameState();
+    this.refreshBottomBarThemeFromGameState();
     this.renderResourceBarFromGameState();
     this.renderBuildingBarFromGameState();
     this.renderChatMessages();
     this.updateMapDisplay();
+  }
+
+  private refreshBottomBarThemeFromGameState(): void {
+    if (!this.resourceBar) {
+      return;
+    }
+    const gameState = this.liveGameState ?? clientState.gameState;
+    const viewerId = this.livePlayerId;
+    const viewerColor =
+      gameState && viewerId && viewerId !== 'spectator' ? gameState.playersById[viewerId]?.color ?? null : null;
+    if (!viewerColor) {
+      this.resourceBar.style.background = 'rgba(2, 6, 23, 0.97)';
+      this.resourceBar.style.borderTopColor = 'rgba(71, 85, 105, 0.9)';
+      this.resourceBar.style.boxShadow = '0 -2px 8px rgba(0,0,0,0.22)';
+      return;
+    }
+    const rgb = hexToRgbComponents(viewerColor);
+    if (!rgb) {
+      this.resourceBar.style.background = 'rgba(2, 6, 23, 0.97)';
+      this.resourceBar.style.borderTopColor = 'rgba(71, 85, 105, 0.9)';
+      this.resourceBar.style.boxShadow = '0 -2px 8px rgba(0,0,0,0.22)';
+      return;
+    }
+    this.resourceBar.style.background = `color-mix(in srgb, ${viewerColor} 52%, rgb(2, 6, 23))`;
+    this.resourceBar.style.borderTopColor = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.78)`;
+    this.resourceBar.style.boxShadow = `0 -2px 8px rgba(${rgb.r},${rgb.g},${rgb.b},0.14)`;
   }
 
   private renderChatMessages(): void {
@@ -817,16 +846,16 @@ export class GameBoardScreen {
 
     const gameState = this.liveGameState;
     const messages = gameState.chatMessages || [];
-    const statusText = this.buildStatusInfoLine(gameState);
-    const statusKey = `${gameState.turn.currentTurn ?? 0}|${gameState.turn.currentPlayerId ?? ''}|${gameState.turn.phase}|${statusText}`;
+    const statusEntry = this.buildStatusInfoLine(gameState);
+    const statusKey = `${gameState.turn.currentTurn ?? 0}|${statusEntry.activePlayerId ?? ''}|${gameState.turn.phase}|${statusEntry.text}`;
     if (this.lastStatusLogKey !== statusKey) {
       this.lastStatusLogKey = statusKey;
-      this.statusChatLog.push({ timestampMs: Date.now(), text: statusText });
+      this.statusChatLog.push({ timestampMs: Date.now(), text: statusEntry.text, activePlayerId: statusEntry.activePlayerId });
     }
 
     const combinedEntries: Array<
       | { kind: 'player'; timestampMs: number; message: typeof messages[number] }
-      | { kind: 'info'; timestampMs: number; text: string }
+      | { kind: 'info'; timestampMs: number; text: string; activePlayerId: string | null }
     > = [];
     messages.forEach((msg) => {
       const ts = Date.parse(msg.timestamp);
@@ -841,6 +870,7 @@ export class GameBoardScreen {
         kind: 'info',
         timestampMs: entry.timestampMs,
         text: entry.text,
+        activePlayerId: entry.activePlayerId,
       });
     });
     combinedEntries.sort((a, b) => a.timestampMs - b.timestampMs);
@@ -849,27 +879,48 @@ export class GameBoardScreen {
     combinedEntries.forEach((entry) => {
       const div = document.createElement('div');
       div.className = 'mb-1 leading-tight text-sm font-sans bg-slate-800/40 p-1 rounded';
-      const nameSpan = document.createElement('span');
-      nameSpan.className = 'font-bold';
-      const msgSpan = document.createElement('span');
-      msgSpan.className = 'text-white';
 
       const timeString = this.formatChatTimestamp(entry.timestampMs);
       if (entry.kind === 'player') {
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'font-bold';
+        const msgSpan = document.createElement('span');
+        msgSpan.className = 'text-white';
         const sender = gameState.playersById[entry.message.senderId];
         const color = sender?.color || '#cbd5e1';
         const name = entry.message.senderName || 'Unknown';
         nameSpan.style.color = color;
         nameSpan.textContent = `${timeString} ${name}: `;
         msgSpan.textContent = entry.message.message || '[Empty Message]';
+        div.appendChild(nameSpan);
+        div.appendChild(msgSpan);
       } else {
-        nameSpan.style.color = '#67e8f9';
-        nameSpan.textContent = `${timeString} INFO: `;
-        msgSpan.textContent = entry.text;
-      }
+        const infoPrefixSpan = document.createElement('span');
+        infoPrefixSpan.className = 'font-bold';
+        infoPrefixSpan.style.color = '#67e8f9';
+        infoPrefixSpan.textContent = `${timeString} INFO: `;
+        div.appendChild(infoPrefixSpan);
 
-      div.appendChild(nameSpan);
-      div.appendChild(msgSpan);
+        const infoParts = this.formatStatusInfoForChat(entry.text);
+        const beforeName = document.createElement('span');
+        beforeName.className = 'text-white';
+        beforeName.textContent = infoParts.beforeName;
+        div.appendChild(beforeName);
+
+        if (infoParts.playerName.length > 0) {
+          const infoNameSpan = document.createElement('span');
+          infoNameSpan.className = 'font-semibold';
+          const infoPlayerColor = entry.activePlayerId ? gameState.playersById[entry.activePlayerId]?.color : null;
+          infoNameSpan.style.color = infoPlayerColor || '#cbd5e1';
+          infoNameSpan.textContent = infoParts.playerName;
+          div.appendChild(infoNameSpan);
+        }
+
+        const afterName = document.createElement('span');
+        afterName.className = 'text-white';
+        afterName.textContent = infoParts.afterName;
+        div.appendChild(afterName);
+      }
       this.chatMessagesContainer?.appendChild(div);
     });
 
@@ -881,19 +932,30 @@ export class GameBoardScreen {
     return `[${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}]`;
   }
 
-  private buildStatusInfoLine(gameState: GameState): string {
+  private buildStatusInfoLine(gameState: GameState): { text: string; activePlayerId: string | null } {
     const activePlayerId = gameState.turn.currentPlayerId;
     const activePlayer = activePlayerId ? gameState.playersById[activePlayerId] : null;
     const activeName = activePlayer?.displayName ?? 'Unknown player';
     const phase = gameState.turn.phase;
     const turnPrefix = `Turn ${gameState.turn.currentTurn ?? 0}: `;
     if (phase === 'ROLL') {
-      return `${turnPrefix}${activeName}'s turn to roll dice.`;
+      return { text: `${turnPrefix}${activeName}'s turn to roll dice.`, activePlayerId: activePlayerId ?? null };
     }
     if (phase === 'ACTION') {
-      return `${turnPrefix}${activeName}'s action phase (build, trade, or end turn).`;
+      return { text: `${turnPrefix}${activeName}'s action phase (build, trade, or end turn).`, activePlayerId: activePlayerId ?? null };
     }
-    return `${turnPrefix}${activeName} is in ${phase} phase.`;
+    return { text: `${turnPrefix}${activeName} is in ${phase} phase.`, activePlayerId: activePlayerId ?? null };
+  }
+
+  private formatStatusInfoForChat(text: string): { beforeName: string; playerName: string; afterName: string } {
+    const m = text.match(/^(Turn \d+:\s+)(.+?)(?:'s turn to roll dice\.|'s action phase \(build, trade, or end turn\)\.| is in .+ phase\.)$/);
+    if (!m) {
+      return { beforeName: text, playerName: '', afterName: '' };
+    }
+    const beforeName = m[1] ?? '';
+    const playerName = m[2] ?? '';
+    const afterName = text.slice((beforeName + playerName).length);
+    return { beforeName, playerName, afterName };
   }
   private renderPlayerCardsFromGameState(): void {
     const gameState = this.liveGameState;
@@ -1644,6 +1706,42 @@ export class GameBoardScreen {
     this.unbindGameSettingsKeydown();
   }
 
+  private openGameRulesPanel(): void {
+    this.ensureGameRulesPanel();
+    if (!this.gameRulesBackdrop) {
+      return;
+    }
+    this.gameRulesBackdrop.style.display = 'flex';
+    this.bindGameRulesKeydown();
+  }
+
+  private closeGameRulesPanel(): void {
+    if (this.gameRulesBackdrop) {
+      this.gameRulesBackdrop.style.display = 'none';
+    }
+    this.unbindGameRulesKeydown();
+  }
+
+  private bindGameRulesKeydown(): void {
+    if (this.gameRulesKeydown) {
+      return;
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        this.closeGameRulesPanel();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    this.gameRulesKeydown = onKey;
+  }
+
+  private unbindGameRulesKeydown(): void {
+    if (this.gameRulesKeydown) {
+      document.removeEventListener('keydown', this.gameRulesKeydown);
+      this.gameRulesKeydown = null;
+    }
+  }
+
   private bindGameSettingsKeydown(): void {
     if (this.gameSettingsKeydown) {
       return;
@@ -1737,8 +1835,29 @@ export class GameBoardScreen {
       });
     });
 
+    const rulesRow = document.createElement('div');
+    rulesRow.style.marginTop = '16px';
+    rulesRow.style.display = 'flex';
+
+    const rulesBtn = document.createElement('button');
+    rulesBtn.type = 'button';
+    rulesBtn.textContent = 'Game Rules';
+    rulesBtn.style.padding = '10px 16px';
+    rulesBtn.style.fontSize = '14px';
+    rulesBtn.style.fontWeight = '600';
+    rulesBtn.style.color = '#ffffff';
+    rulesBtn.style.background = 'rgba(30, 41, 59, 0.95)';
+    rulesBtn.style.border = '1px solid rgba(255, 255, 255, 0.28)';
+    rulesBtn.style.borderRadius = '8px';
+    rulesBtn.style.cursor = 'pointer';
+    rulesBtn.style.width = '100%';
+    rulesBtn.addEventListener('click', () => {
+      this.openGameRulesPanel();
+    });
+    rulesRow.appendChild(rulesBtn);
+
     const closeRow = document.createElement('div');
-    closeRow.style.marginTop = '16px';
+    closeRow.style.marginTop = '12px';
     closeRow.style.display = 'flex';
     closeRow.style.justifyContent = 'flex-end';
 
@@ -1760,6 +1879,7 @@ export class GameBoardScreen {
     panel.appendChild(title);
     panel.appendChild(row1);
     panel.appendChild(row2);
+    panel.appendChild(rulesRow);
     panel.appendChild(closeRow);
 
     backdrop.appendChild(panel);
@@ -1767,6 +1887,157 @@ export class GameBoardScreen {
 
     document.body.appendChild(backdrop);
     this.gameSettingsBackdrop = backdrop;
+  }
+
+  private ensureGameRulesPanel(): void {
+    if (this.gameRulesBackdrop) {
+      return;
+    }
+
+    const backdrop = document.createElement('div');
+    backdrop.style.display = 'none';
+    backdrop.style.position = 'fixed';
+    backdrop.style.inset = '0';
+    backdrop.style.zIndex = '110';
+    backdrop.style.background = 'rgba(15, 23, 42, 0.72)';
+    backdrop.style.alignItems = 'center';
+    backdrop.style.justifyContent = 'center';
+    backdrop.style.padding = '16px';
+
+    const panel = document.createElement('div');
+    panel.className = 'font-hexahaven-ui';
+    panel.style.maxWidth = '820px';
+    panel.style.width = '100%';
+    panel.style.maxHeight = '86vh';
+    panel.style.display = 'flex';
+    panel.style.flexDirection = 'column';
+    panel.style.background = 'rgba(15, 23, 42, 0.97)';
+    panel.style.border = '1px solid rgba(148, 163, 184, 0.45)';
+    panel.style.borderRadius = '12px';
+    panel.style.boxShadow = '0 20px 50px rgba(0,0,0,0.45)';
+    panel.addEventListener('click', (e) => e.stopPropagation());
+
+    const title = document.createElement('h2');
+    title.style.margin = '0';
+    title.style.padding = '16px 20px 12px 20px';
+    title.style.fontSize = '20px';
+    title.style.fontWeight = '700';
+    title.style.color = '#ffffff';
+    title.style.borderBottom = '1px solid rgba(148, 163, 184, 0.35)';
+    title.textContent = 'HexaHaven - Game Rules';
+
+    const body = document.createElement('div');
+    body.style.padding = '16px 20px';
+    body.style.overflowY = 'auto';
+    body.style.display = 'grid';
+    body.style.gap = '14px';
+    body.style.color = '#e2e8f0';
+    body.style.fontSize = '14px';
+    body.style.lineHeight = '1.55';
+
+    const sections: { heading: string; lines: string[] }[] = [
+      { heading: 'Objective', lines: ['First to 10 Victory Points (VP) wins.'] },
+      {
+        heading: 'Setup',
+        lines: [
+          'Each player places 1 settlement + 1 road, then repeats in the same order.',
+          'Settlements must be at least 2 edges apart.',
+          'Gain 1 resource per hex next to your second settlement.',
+        ],
+      },
+      {
+        heading: 'Turn Flow',
+        lines: [
+          'Roll: Roll 2 dice. Matching tiles produce resources.',
+          'Trade: Trade with players or bank (4 same -> 1 any).',
+          'Build: Spend resources to place roads, settlements, cities, or buy dev cards.',
+        ],
+      },
+      {
+        heading: 'Build Costs',
+        lines: [
+          'Road: ember + stone',
+          'Settlement: ember + bloom + stone',
+          'City: 3 stone + 2 bloom',
+          'Dev Card: 2 crystal + 2 gold',
+        ],
+      },
+      {
+        heading: 'Building Rules',
+        lines: [
+          "Roads must connect to your network and can't pass through another player's settlement.",
+          'Settlements must connect to your road and follow the distance rule.',
+          'Cities replace settlements and produce 2 resources.',
+        ],
+      },
+      {
+        heading: 'Development Cards',
+        lines: [
+          'Types: VP, Road Building, Year of Plenty, Monopoly.',
+          'Cannot use the turn you buy (except VP cards).',
+        ],
+      },
+      {
+        heading: 'Victory Points',
+        lines: [
+          'Settlement = 1 VP, City = 2 VP, Longest Road = 2 VP (minimum 5), VP cards = 1 VP each.',
+        ],
+      },
+    ];
+
+    sections.forEach(({ heading, lines }) => {
+      const section = document.createElement('section');
+      const h = document.createElement('h3');
+      h.style.margin = '0 0 6px 0';
+      h.style.fontSize = '13px';
+      h.style.fontWeight = '700';
+      h.style.textTransform = 'uppercase';
+      h.style.letterSpacing = '0.06em';
+      h.style.color = '#fde68a';
+      h.textContent = heading;
+      section.appendChild(h);
+      const ul = document.createElement('ul');
+      ul.style.margin = '0';
+      ul.style.paddingLeft = '18px';
+      ul.style.display = 'grid';
+      ul.style.gap = '4px';
+      lines.forEach((line) => {
+        const li = document.createElement('li');
+        li.textContent = line;
+        ul.appendChild(li);
+      });
+      section.appendChild(ul);
+      body.appendChild(section);
+    });
+
+    const footer = document.createElement('div');
+    footer.style.padding = '12px 20px 16px 20px';
+    footer.style.display = 'flex';
+    footer.style.justifyContent = 'flex-end';
+    footer.style.borderTop = '1px solid rgba(148, 163, 184, 0.3)';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.textContent = 'Back to Game';
+    closeBtn.style.padding = '8px 16px';
+    closeBtn.style.fontSize = '14px';
+    closeBtn.style.fontWeight = '600';
+    closeBtn.style.color = '#ffffff';
+    closeBtn.style.background = 'rgba(51, 65, 85, 0.95)';
+    closeBtn.style.border = '1px solid rgba(255, 255, 255, 0.35)';
+    closeBtn.style.borderRadius = '8px';
+    closeBtn.style.cursor = 'pointer';
+    closeBtn.addEventListener('click', () => this.closeGameRulesPanel());
+
+    footer.appendChild(closeBtn);
+    panel.appendChild(title);
+    panel.appendChild(body);
+    panel.appendChild(footer);
+    backdrop.appendChild(panel);
+    backdrop.addEventListener('click', () => this.closeGameRulesPanel());
+
+    document.body.appendChild(backdrop);
+    this.gameRulesBackdrop = backdrop;
   }
 
   private createGameSettingsSliderRow(
@@ -1815,9 +2086,14 @@ export class GameBoardScreen {
   destroy(): void {
     this.dismissBuildRecipePopover();
     this.closeGameSettingsPanel();
+    this.closeGameRulesPanel();
     if (this.gameSettingsBackdrop) {
       this.gameSettingsBackdrop.remove();
       this.gameSettingsBackdrop = null;
+    }
+    if (this.gameRulesBackdrop) {
+      this.gameRulesBackdrop.remove();
+      this.gameRulesBackdrop = null;
     }
     this.gameSettingsBoardMusicRange = null;
     this.gameSettingsBoardMusicValueEl = null;
