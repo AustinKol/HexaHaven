@@ -5,7 +5,7 @@ Players share a room key, join a lobby, and compete on a hexagonal map where til
 
 Deployed on: https://hexa-haven.vercel.app/
 
-Database deployed on Google Cloud Run
+Backend deployed on Google Cloud Run
 
 ## Game Screen
 
