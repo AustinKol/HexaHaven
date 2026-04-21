@@ -3,6 +3,8 @@
 HexaHaven is a turn-based strategy hex game built with Phaser, Vite, and Socket.IO.  
 Players share a room key, join a lobby, and compete on a hexagonal map where tile outcomes and resources are driven by dice rolls.
 
+Deployed on: https://hexa-haven.vercel.app/
+
 ## Game Screen
 
 ![HexaHaven gameplay screenshot](./docs/images/game-screen.png)
