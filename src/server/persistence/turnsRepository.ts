@@ -89,8 +89,7 @@ export class TurnsRepository extends FirestoreRepository {
   /**
    * Appends an action to the turn's actions array.
    * Uses arrayUnion so concurrent appends don't overwrite each other.
-   * NOTE: arrayUnion does NOT guarantee order — the GameEngine appends actions
-   *       sequentially (single-threaded per room), so order is preserved in practice.
+   * NOTE: arrayUnion does NOT guarantee order.
    */
   async appendAction(gameId: string, turnId: string, action: TurnAction): Promise<void> {
     await this.turnsCol(gameId).doc(turnId).update({
