@@ -24,6 +24,7 @@ import { gameSessionsRepository } from './gameSessionsRepository';
 import { playersRepository } from './playersRepository';
 import { turnsRepository } from './turnsRepository';
 import { logger } from '../utils/logger';
+import { evaluateWinner } from '../engine/WinConditionEvaluator';
 
 const DEFAULT_RESOURCES: ResourceBundle = {
   CRYSTAL: 0,
@@ -743,6 +744,12 @@ export class GamePersistenceService {
       turnsPlayed: gameState.playersById[playerId].stats.turnsPlayed + 1,
     });
 
+    const postTurnState = await this.loadRequiredGame(gameId);
+    const evaluation = evaluateWinner(postTurnState);
+    if (evaluation.winnerPlayerId) {
+      return await this.finalizeGame(gameId, evaluation.winnerPlayerId, evaluation.reason);
+    }
+
     const nextTurn = this.buildNextTurnState(gameState, nextIndex, now);
 
     await turnsRepository.createTurn(gameId, {
@@ -761,10 +768,11 @@ export class GamePersistenceService {
   async finalizeGame(
     gameId: string,
     winnerId: string,
+    reason?: string,
   ): Promise<GameState> {
     await gameSessionsRepository.finalizeGame(gameId, winnerId);
     const gameState = await this.loadRequiredGame(gameId);
-    logger.info('Game ' + gameId + ' finished. Winner: ' + winnerId);
+    logger.info('Game ' + gameId + ' finished. Winner: ' + winnerId + (reason ? ' (' + reason + ')' : ''));
     return gameState;
   }
 
@@ -883,6 +891,12 @@ export class GamePersistenceService {
         ...endedPlayer.stats,
         turnsPlayed: endedPlayer.stats.turnsPlayed + 1,
       });
+    }
+
+    const postTurnState = await this.loadRequiredGame(gameId);
+    const evaluation = evaluateWinner(postTurnState);
+    if (evaluation.winnerPlayerId) {
+      return await this.finalizeGame(gameId, evaluation.winnerPlayerId, evaluation.reason);
     }
 
     const nextTurn = this.buildNextTurnState(gameState, nextIndex, now);
