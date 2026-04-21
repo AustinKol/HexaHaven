@@ -60,7 +60,7 @@ export function createDiceHud(): DiceHud {
   root.className = 'mb-3 hexahaven-dice-hud';
 
   const row = document.createElement('div');
-  row.className = 'hexahaven-dice-row flex flex-wrap items-center justify-center gap-2';
+  row.className = 'hexahaven-dice-row flex flex-wrap items-center justify-start gap-2';
 
   const rollingZone = document.createElement('div');
   rollingZone.className = 'hexahaven-dice-rolling-zone';
@@ -84,24 +84,13 @@ export function createDiceHud(): DiceHud {
   rollingZone.appendChild(rollingRow);
 
   const d1 = buildDieFace();
-  const plus = document.createElement('span');
-  plus.className = 'font-hexahaven-ui text-slate-400 text-sm select-none';
-  plus.textContent = '+';
   const d2 = buildDieFace();
-  const eq = document.createElement('span');
-  eq.className = 'font-hexahaven-ui text-slate-400 text-sm select-none';
-  eq.textContent = '=';
-  const sumEl = document.createElement('span');
-  sumEl.className = 'font-hexahaven-ui text-lg font-semibold text-white tabular-nums min-w-[1.5rem] text-center';
 
   const caption = document.createElement('div');
-  caption.className = 'font-hexahaven-ui mt-1.5 text-center text-xs text-slate-400 min-h-[1rem]';
+  caption.className = 'font-hexahaven-ui mt-1.5 text-left text-xs text-slate-400 min-h-[1rem]';
 
   row.appendChild(d1.el);
-  row.appendChild(plus);
   row.appendChild(d2.el);
-  row.appendChild(eq);
-  row.appendChild(sumEl);
 
   root.appendChild(row);
   root.appendChild(rollingZone);
@@ -137,7 +126,6 @@ export function createDiceHud(): DiceHud {
   const setRandomRollingFrame = (): void => {
     d1.setValue(1 + Math.floor(Math.random() * 6));
     d2.setValue(1 + Math.floor(Math.random() * 6));
-    sumEl.textContent = '···';
     caption.textContent = '';
   };
 
@@ -146,26 +134,23 @@ export function createDiceHud(): DiceHud {
     d2.el.style.opacity = '1';
     d1.setValue(roll.d1Val);
     d2.setValue(roll.d2Val);
-    sumEl.textContent = String(roll.sum);
     caption.textContent = '';
   };
 
   const setPlaceholder = (message: string): void => {
     d1.setValue(1);
     d2.setValue(1);
-    sumEl.textContent = '—';
     caption.textContent = message;
-    d1.el.style.opacity = '0.45';
-    d2.el.style.opacity = '0.45';
+    d1.el.style.opacity = '1';
+    d2.el.style.opacity = '1';
   };
 
   const setFromStringMessage = (message: string): void => {
     d1.setValue(1);
     d2.setValue(1);
-    sumEl.textContent = '—';
     caption.textContent = message;
-    d1.el.style.opacity = '0.55';
-    d2.el.style.opacity = '0.55';
+    d1.el.style.opacity = '1';
+    d2.el.style.opacity = '1';
   };
 
   const playSettle = (): void => {

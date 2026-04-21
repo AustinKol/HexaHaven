@@ -229,12 +229,7 @@ export class GameBoardScreen {
   private pendingBuild: { kind: BuildKind; cost: ResourceBundle } | null = null;
   private liveGameState: GameState | null = null;
   private livePlayerId: string | null = null;
-  private lastResourceSnapshot: ResourceBundle | null = null;
-  private lastRenderedResourceCounts: Partial<Record<ResourceKey, number>> | null = null;
-  private resourceFxLayer: HTMLDivElement | null = null;
-  private activeResourceFxTimers: number[] = [];
-  private pendingResourceBarPops: ResourceKey[] = [];
-  private fallbackLastDiceRoll = 'Not rolled yet';
+  private fallbackLastDiceRoll = '';
   private readonly onSettingsChanged = (): void => {
     this.backgroundMusic.volume = scaledBoardMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
     this.syncGameSettingsPanelSliders();
@@ -601,38 +596,34 @@ export class GameBoardScreen {
       header.appendChild(devBadge);
     }
 
-    const turnTimerLabel = document.createElement('div');
-    turnTimerLabel.className = 'font-hexahaven-ui text-[10px] text-cyan-200';
-    turnTimerLabel.textContent = 'Turn Timer';
-
     const turnTimerValue = document.createElement('div');
     turnTimerValue.className =
-      'font-hexahaven-ui mb-2 rounded-md border px-2 py-1 text-center text-lg font-bold tracking-widest tabular-nums';
+      'font-hexahaven-ui flex h-9 w-[76px] shrink-0 items-center justify-center rounded-md border px-2 text-center text-sm font-bold tracking-widest tabular-nums';
     turnTimerValue.textContent = '01:00';
 
     const diceHud = createDiceHud();
-    diceHud.root.style.marginBottom = '0';
-
-    const lastDiceRollLabel = document.createElement('div');
-    lastDiceRollLabel.className = 'font-hexahaven-ui text-xs text-slate-300';
-    lastDiceRollLabel.textContent = 'Last Dice Roll';
+    diceHud.root.style.marginBottom = '-4px';
+    diceHud.root.style.alignSelf = 'flex-start';
 
     const dicePanel = document.createElement('div');
     dicePanel.className =
-      'absolute left-4 flex flex-col gap-2 rounded-xl border border-slate-600 bg-slate-900/88 px-3 py-2 text-white shadow-md pointer-events-auto';
+      'absolute left-4 flex flex-col gap-1 text-white pointer-events-auto';
     dicePanel.style.zIndex = '3';
-    dicePanel.style.bottom = `${GAME_BOARD_BOTTOM_BAR_PX + 10}px`;
+    dicePanel.style.bottom = `${GAME_BOARD_BOTTOM_BAR_PX + 4}px`;
     dicePanel.setAttribute('aria-label', 'Dice roll');
-    dicePanel.appendChild(lastDiceRollLabel);
     dicePanel.appendChild(diceHud.root);
 
     const rollDiceButton = document.createElement('button');
     rollDiceButton.type = 'button';
     rollDiceButton.className =
-      'font-hexahaven-ui w-full rounded-md border border-cyan-400/60 bg-cyan-900/60 px-2 py-2 text-xs font-semibold';
+      'font-hexahaven-ui h-9 rounded-md border border-cyan-400 bg-cyan-900 px-3 text-xs font-semibold text-white';
     rollDiceButton.textContent = 'Roll Dice';
     rollDiceButton.addEventListener('click', () => this.handleRollDiceClick());
-    dicePanel.appendChild(rollDiceButton);
+    const rollControls = document.createElement('div');
+    rollControls.className = 'flex items-center gap-2';
+    rollControls.appendChild(rollDiceButton);
+    rollControls.appendChild(turnTimerValue);
+    dicePanel.appendChild(rollControls);
 
     const actions = document.createElement('div');
     actions.className = 'flex flex-col gap-1.5';
@@ -746,8 +737,6 @@ export class GameBoardScreen {
     actions.appendChild(endTurnButton);
 
     panel.appendChild(header);
-    panel.appendChild(turnTimerLabel);
-    panel.appendChild(turnTimerValue);
     panel.appendChild(actions);
 
     this.turnHudPanel = panel;
@@ -1762,7 +1751,7 @@ export class GameBoardScreen {
 
     if (this.rollDiceButton) {
       this.rollDiceButton.disabled = !canRoll;
-      this.rollDiceButton.style.opacity = this.rollDiceButton.disabled ? '0.55' : '1';
+      this.rollDiceButton.style.opacity = '1';
       this.rollDiceButton.style.cursor = this.rollDiceButton.disabled ? 'not-allowed' : 'pointer';
     }
 
