@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { GameState, PlayerState, ResourceBundle } from '../../shared/types/domain';
+import type { GameState, PlayerState, ResourceBundle, TileState } from '../../shared/types/domain';
 import { GamePersistenceService } from './GamePersistenceService';
 import { playersRepository } from './playersRepository';
 import { gameSessionsRepository } from './gameSessionsRepository';
@@ -52,6 +52,7 @@ function createGameState(params: {
   players: PlayerState[];
   currentTurn?: number;
   turnEndsAt?: string | null;
+  tilesById?: Record<string, TileState>;
 }): GameState {
   const gameId = params.gameId ?? 'g_rejoin';
   const roomCode = params.roomCode ?? 'ABC123';
@@ -81,7 +82,7 @@ function createGameState(params: {
     playerOrder,
     playersById,
     board: {
-      tilesById: {},
+      tilesById: params.tilesById ?? {},
       structuresById: {},
     },
     turn: {
@@ -97,6 +98,19 @@ function createGameState(params: {
   };
 }
 
+function createTile(tileId: string, q: number, r: number): TileState {
+  return {
+    tileId,
+    coord: { q, r },
+    resourceType: 'STONE',
+    numberToken: 8,
+    adjacentTiles: [],
+    vertices: [],
+    edges: [],
+    createdAt: FIXED_NOW,
+  };
+}
+
 test('rejoin in-progress game with same display name returns the same player identity and no duplicate player writes', async () => {
   const service = new GamePersistenceService();
   const gameState = createGameState({
@@ -107,6 +121,9 @@ test('rejoin in-progress game with same display name returns the same player ide
     ],
     currentTurn: 11,
     turnEndsAt: '2026-01-01T00:08:30.000Z',
+    tilesById: {
+      't:0,0': createTile('t:0,0', 0, 0),
+    },
   });
 
   const originalGetGameState = service.getGameState.bind(service);
@@ -133,6 +150,8 @@ test('rejoin in-progress game with same display name returns the same player ide
     assert.equal(result.playerId, 'p1');
     assert.equal(result.gameState.turn.currentTurn, 11);
     assert.equal(result.gameState.turn.turnEndsAt, '2026-01-01T00:08:30.000Z');
+    assert.equal(Object.keys(result.gameState.board.tilesById).length, 1);
+    assert.ok(result.gameState.board.tilesById['t:0,0']);
     assert.equal(createPlayerCalls, 0);
     assert.equal(updatePlayerOrderCalls, 0);
     assert.equal(updateTurnStateCalls, 0);

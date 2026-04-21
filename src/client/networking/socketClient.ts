@@ -16,19 +16,32 @@ import type {
 } from '../../shared/types/socket';
 import { CLIENT_EVENTS } from '../../shared/constants/socketEvents';
 import { clientState, setClientState } from '../state/clientState';
+import { getLobbySession } from '../state/lobbyState';
 
 type TypedSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
 let socket: TypedSocket | null = null;
 let currentSocketAuthKey: string | null = null;
 
+function resolvePersistedPlayerId(): string | null {
+  if (clientState.playerId && clientState.playerId.trim().length > 0) {
+    return clientState.playerId.trim();
+  }
+  const lobbySession = getLobbySession();
+  if (lobbySession?.playerId && lobbySession.playerId.trim().length > 0) {
+    return lobbySession.playerId.trim();
+  }
+  return null;
+}
+
 function resolveSocketAuth(gameId?: string, playerId: string | null = clientState.playerId): {
   gameId?: string;
   playerId?: string;
 } {
+  const resolvedPlayerId = playerId ?? resolvePersistedPlayerId();
   return {
     gameId,
-    playerId: playerId ?? undefined,
+    playerId: resolvedPlayerId ?? undefined,
   };
 }
 
@@ -41,7 +54,9 @@ function buildSocketAuthKey(auth?: { gameId?: string; playerId?: string }): stri
 }
 
 function applyActionState(data: SimpleActionAckData): SimpleActionAckData {
+  const resolvedPlayerId = resolvePersistedPlayerId();
   setClientState({
+    playerId: clientState.playerId ?? resolvedPlayerId,
     gameState: data.gameState,
     lastActionRejected: null,
   });
@@ -116,7 +131,7 @@ export async function createGame(request: CreateGameRequest): Promise<CreateGame
     gameState: data.gameState,
     lastActionRejected: null,
   });
-  connectSocket(resolveSocketAuth(data.gameState.gameId, data.playerId));
+  connectSocket(resolveSocketAuth(data.gameState.roomCode, data.playerId));
   return data;
 }
 
@@ -131,7 +146,7 @@ export async function joinGame(request: JoinGameRequest): Promise<JoinGameAckDat
     gameState: data.gameState,
     lastActionRejected: null,
   });
-  connectSocket(resolveSocketAuth(data.gameState.gameId, data.playerId));
+  connectSocket(resolveSocketAuth(data.gameState.roomCode, data.playerId));
   return data;
 }
 

@@ -142,6 +142,13 @@ function normalizeSeed(seed: string | number | undefined): number | null {
     return null;
 }
 
+function buildBoardTilesSignature(tiles: TileState[]): string {
+    return tiles
+        .map((tile) => tile.tileId)
+        .sort((left, right) => left.localeCompare(right))
+        .join('|');
+}
+
 function mulberry32(seed: number): () => number {
     let state = seed >>> 0;
     return () => {
@@ -810,7 +817,8 @@ export class MapGenTest extends Scene {
     private hoveredVertexId: string | null = null;
     private hoveredEdgeId: string | null = null;
     private pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null;
-    private readonly boardTiles: TileState[];
+    private boardTiles: TileState[];
+    private boardTilesSignature: string;
     private structures: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>;
     private roadHoverColor?: string;
 
@@ -822,6 +830,7 @@ export class MapGenTest extends Scene {
         this.onMapPointerDown = options?.onMapPointerDown;
         this.pendingBuildKind = options?.pendingBuildKind;
         this.boardTiles = options?.boardTiles ?? [];
+        this.boardTilesSignature = buildBoardTilesSignature(this.boardTiles);
         this.structures = options?.structures ?? [];
         this.roadHoverColor = options?.roadHoverColor;
         if (this.compactFit) {
@@ -1557,12 +1566,22 @@ export class MapGenTest extends Scene {
         pendingBuildKind?: 'SETTLEMENT' | 'CITY' | 'ROAD' | null,
         structures?: Array<{ type: 'SETTLEMENT' | 'CITY' | 'ROAD'; ownerColor: string; vertex?: any; edge?: any }>,
         roadHoverColor?: string,
+        boardTiles?: TileState[],
     ): void {
+        let boardTilesChanged = false;
         if (pendingBuildKind !== undefined) {
             this.pendingBuildKind = pendingBuildKind;
         }
         if (structures !== undefined) {
             this.structures = structures;
+        }
+        if (boardTiles !== undefined) {
+            const nextSignature = buildBoardTilesSignature(boardTiles);
+            if (nextSignature !== this.boardTilesSignature) {
+                this.boardTiles = boardTiles;
+                this.boardTilesSignature = nextSignature;
+                boardTilesChanged = true;
+            }
         }
         if (pendingBuildKind !== undefined) {
             if (this.pendingBuildKind === 'ROAD') {
@@ -1570,6 +1589,11 @@ export class MapGenTest extends Scene {
             } else {
                 this.roadHoverColor = undefined;
             }
+        }
+        if (boardTilesChanged) {
+            this.regenerateMap();
+            this.redrawHover();
+            return;
         }
         this.redrawHover();
         this.renderStructures();

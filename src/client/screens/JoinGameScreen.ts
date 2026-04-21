@@ -73,7 +73,7 @@ export class JoinGameScreen {
           playerName: joinedPlayer?.displayName ?? name,
           role: joinedPlayer?.isHost ? 'host' : 'guest',
         });
-        this.navigate?.(ScreenId.WaitingRoom);
+        this.navigate?.(ack.gameState.roomStatus === 'in_progress' ? ScreenId.GameBoard : ScreenId.WaitingRoom);
       } catch (error) {
         errorText.textContent = error instanceof Error ? error.message : 'Unable to join room.';
       } finally {

@@ -1711,6 +1711,7 @@ export class GameBoardScreen {
           edge: s.edge,
         })),
         roadHoverColor,
+        Object.values(gameState.board.tilesById),
       );
     }
   }
