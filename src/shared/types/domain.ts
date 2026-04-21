@@ -106,6 +106,8 @@ export interface EdgeLocation {
   hex: HexCoord;
   dir: number;
   adjacentHexes: HexCoord[];
+  /** Stable IDs of the two vertices at this edge's endpoints (matches VertexLocation.id). */
+  vertexIds?: string[];
 }
 
 export interface RoadPath {

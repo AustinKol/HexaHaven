@@ -6,7 +6,7 @@ import type { DiceRoll, GamePhase, GameState, ResourceBundle, StructureState, Ve
 import { connectSocket, endTurn, rollDice, syncGameState } from '../networking/socketClient';
 import { clientState, setClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
-import { TestMapGenScreen, type MapPointerHit } from './TestMapGenScreen';
+import { TestMapGenScreen, type MapPointerEdgeHit, type MapPointerHit } from './TestMapGenScreen';
 
 type ResourceKey = keyof ResourceBundle;
 
@@ -816,23 +816,15 @@ export class GameBoardScreen {
     gs: GameState,
     playerId: string,
     cost: ResourceBundle,
-    edgeId: string,
+    edgeHit: MapPointerHit['edge'] & object,
   ): StructureState {
     const owner = gs.playersById[playerId];
-    // Parse edge ID: format is "e:q,r,dir"
-    const edgeParts = edgeId.substring(2).split(',');
-    const q = parseInt(edgeParts[0], 10);
-    const r = parseInt(edgeParts[1], 10);
-    const dir = parseInt(edgeParts[2], 10);
+    const { id: edgeId, hex: hex1, edge: dir } = edgeHit;
 
-    // Hex neighbor directions (axial coordinates top-flat clockwise from bottom-right slant)
     const HEX_DIRS: [number, number][] = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
-    
-    // Calculate adjacent hexes for this edge (the two hexes that share this edge)
-    const hex1 = { q, r };
     const [dq, dr] = HEX_DIRS[dir];
-    const hex2 = { q: q + dq, r: r + dr };
-    
+    const hex2 = { q: hex1.q + dq, r: hex1.r + dr };
+
     return {
       structureId: `road:${playerId}:${edgeId}`,
       ownerPlayerId: playerId,
@@ -847,6 +839,7 @@ export class GameBoardScreen {
         hex: hex1,
         dir,
         adjacentHexes: [hex1, hex2],
+        vertexIds: edgeHit.vertices.map((v) => v.id),
       },
       adjacentStructures: [],
       adjacentTiles: [],
@@ -881,7 +874,7 @@ export class GameBoardScreen {
     }
 
     let selectedVertex: VertexLocation | null = null;
-    let selectedEdgeId: string | null = null;
+    let selectedEdge: MapPointerHit['edge'] = null;
 
     if (kind === 'SETTLEMENT') {
       selectedVertex = hit.vertex;
@@ -908,9 +901,9 @@ export class GameBoardScreen {
         console.log('[Road] No edge hit');
         return;
       }
-      selectedEdgeId = hit.edge.id;
+      selectedEdge = hit.edge;
       const canPlaceRoad = this.canPlaceRoad(gs, pid, hit.edge);
-      console.log('[Road] Checking edge:', { edge: selectedEdgeId, canPlace: canPlaceRoad });
+      console.log('[Road] Checking edge:', { edge: selectedEdge.id, canPlace: canPlaceRoad });
       if (!canPlaceRoad) {
         console.log('[Road] Edge cannot connect to settlement or road');
         return;
@@ -919,51 +912,25 @@ export class GameBoardScreen {
 
     this.pendingBuild = null;
     console.log('[Settlement] Proceeding with placement');
-    this.applyBuildPurchase(kind, cost, selectedVertex, selectedEdgeId);
+    this.applyBuildPurchase(kind, cost, selectedVertex, selectedEdge);
   }
 
-  private canPlaceRoad(gs: GameState, playerId: string, edge: any): boolean {
+  private canPlaceRoad(gs: GameState, playerId: string, edge: MapPointerEdgeHit): boolean {
     const playerStructures = Object.values(gs.board.structuresById).filter(
       (s) => s.ownerPlayerId === playerId,
     );
 
-    // Get the two vertices at the endpoints of this edge
-    const vertexIds = edge.vertices.map((v: any) => v.id);
-    const vertexHits = edge.vertices; // Each has {id, hex, corner}
+    const endpointIds = new Set(edge.vertices.map((v) => v.id));
 
-    // Check if either endpoint has a player settlement or city
-    for (const vId of vertexIds) {
-      if (playerStructures.some((s) => s.locationType === 'VERTEX' && s.vertex?.id === vId)) {
+    for (const s of playerStructures) {
+      if (s.locationType === 'VERTEX' && s.vertex && endpointIds.has(s.vertex.id)) {
         return true;
       }
-    }
-
-    // Check if any player roads connect to either endpoint
-    const playerRoads = playerStructures.filter((s) => s.type === 'ROAD' && s.edge);
-    const HEX_DIRS: [number, number][] = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
-
-    for (const road of playerRoads) {
-      if (!road.edge) continue;
-      const { hex: roadHex, dir: roadDir } = road.edge;
-
-      // Check each endpoint of the new road
-      for (const vhit of vertexHits) {
-        const { hex: vHex, corner: vCorner } = vhit;
-
-        // Check if road is in the same hex and touches this endpoint corner
-        if (roadHex.q === vHex.q && roadHex.r === vHex.r) {
-          const roadCorner1 = roadDir;
-          const roadCorner2 = (roadDir + 1) % 6;
-          if (roadCorner1 === vCorner || roadCorner2 === vCorner) {
+      if (s.type === 'ROAD' && s.edge?.vertexIds) {
+        for (const vId of s.edge.vertexIds) {
+          if (endpointIds.has(vId)) {
             return true;
           }
-        }
-
-        // Check if road's adjacent hex contains this vertex
-        const [dq, dr] = HEX_DIRS[roadDir];
-        const roadAdjHex = { q: roadHex.q + dq, r: roadHex.r + dr };
-        if ((roadAdjHex.q === vHex.q && roadAdjHex.r === vHex.r)) {
-          return true;
         }
       }
     }
@@ -971,7 +938,7 @@ export class GameBoardScreen {
     return false;
   }
 
-  private applyBuildPurchase(kind: BuildKind, cost: ResourceBundle, selectedVertex: VertexLocation | null = null, selectedEdgeId: string | null = null): void {
+  private applyBuildPurchase(kind: BuildKind, cost: ResourceBundle, selectedVertex: VertexLocation | null = null, selectedEdge: MapPointerHit['edge'] = null): void {
     this.dismissBuildRecipePopover();
     const gs = this.liveGameState ?? clientState.gameState;
     const pid = this.livePlayerId;
@@ -1013,14 +980,14 @@ export class GameBoardScreen {
       p.stats.citiesBuilt = (p.stats.citiesBuilt ?? 0) + 1;
       p.stats.publicVP = (p.stats.publicVP ?? 0) + 1; // +1 VP existing settlement = 2 VP total
       placed = true;
-    } else if (kind === 'ROAD' && selectedEdgeId) {
+    } else if (kind === 'ROAD' && selectedEdge) {
       const roadExists = Object.values(next.board.structuresById).some(
-        (s) => s.locationType === 'EDGE' && s.edge?.id === selectedEdgeId,
+        (s) => s.locationType === 'EDGE' && s.edge?.id === selectedEdge.id,
       );
       if (roadExists) {
         return;
       }
-      const road = this.createRoadStructure(next, pid, cost, selectedEdgeId);
+      const road = this.createRoadStructure(next, pid, cost, selectedEdge);
       next.board.structuresById[road.structureId] = road;
       p.stats.roadsBuilt = (p.stats.roadsBuilt ?? 0) + 1;
       placed = true;
