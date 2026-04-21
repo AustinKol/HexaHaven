@@ -229,6 +229,11 @@ export class GameBoardScreen {
   private pendingBuild: { kind: BuildKind; cost: ResourceBundle } | null = null;
   private liveGameState: GameState | null = null;
   private livePlayerId: string | null = null;
+  private lastResourceSnapshot: ResourceBundle | null = null;
+  private lastRenderedResourceCounts: Partial<Record<ResourceKey, number>> | null = null;
+  private resourceFxLayer: HTMLDivElement | null = null;
+  private activeResourceFxTimers: number[] = [];
+  private pendingResourceBarPops: ResourceKey[] = [];
   private fallbackLastDiceRoll = 'Not rolled yet';
   private readonly onSettingsChanged = (): void => {
     this.backgroundMusic.volume = scaledBoardMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
@@ -401,6 +406,7 @@ export class GameBoardScreen {
     if (!this.buttonContainer) {
       return;
     }
+    this.ensureResourceFxLayer(this.buttonContainer);
     this.mountPlayerPanel(this.buttonContainer);
     this.mountTurnHud(this.buttonContainer);
     this.startTurnTimerTicker();
@@ -413,10 +419,12 @@ export class GameBoardScreen {
       });
       this.unsubscribe = subscribeClientState((state) => {
         console.log('[GameBoardScreen] Client state updated. Chat messages count:', state.gameState?.chatMessages?.length);
+        const previousState = this.liveGameState;
         this.liveGameState = state.gameState;
         this.livePlayerId = state.playerId ?? this.livePlayerId;
         this.updateTurnHud();
         this.refreshPlayerUi();
+        this.maybeAnimateResourceDistribution(previousState, state.gameState);
       });
     } else {
       this.liveGameState = clientState.gameState;
@@ -507,6 +515,19 @@ export class GameBoardScreen {
     panel.style.width = '128px';
     this.playerPanel = panel;
     parent.appendChild(panel);
+  }
+
+  private ensureResourceFxLayer(parent: HTMLElement): void {
+    if (this.resourceFxLayer) {
+      this.resourceFxLayer.remove();
+    }
+    const layer = document.createElement('div');
+    layer.style.position = 'absolute';
+    layer.style.inset = '0';
+    layer.style.zIndex = '6';
+    layer.style.pointerEvents = 'none';
+    this.resourceFxLayer = layer;
+    parent.appendChild(layer);
   }
 
   private mountResourceBar(parent: HTMLElement): void {
@@ -973,6 +994,7 @@ export class GameBoardScreen {
       card.className = 'font-hexahaven-ui rounded-lg border-2 border-solid px-2 py-2 text-white shadow-md';
       const accent = player.color || '#94a3b8';
       card.style.borderColor = accent;
+      card.dataset.playerId = player.playerId;
       const rgb = hexToRgbComponents(accent);
       if (rgb) {
         // Interior is mostly their color, mixed with slate so labels stay legible.
@@ -1002,11 +1024,289 @@ export class GameBoardScreen {
     });
   }
 
+  private getTileScreenPosition(tileId: string): { x: number; y: number } | null {
+    const scene = this.mapScreen?.getPhaser3Scene?.();
+    if (!scene || !this.buttonContainer) {
+      return null;
+    }
+    const anyScene = scene as unknown as {
+      cameras?: { main?: { worldView: { x: number; y: number }; zoom: number } };
+      game?: { canvas?: HTMLCanvasElement };
+    };
+    const camera = anyScene.cameras?.main;
+    const canvas = anyScene.game?.canvas;
+    const tile = (this.liveGameState ?? clientState.gameState)?.board.tilesById[tileId];
+    if (!camera || !canvas || !tile) {
+      return null;
+    }
+    // Matches compact-fit map rendering in TestMapGenScreen/MapGenTest.
+    const size = 34;
+    const worldX = size * (1.5 * tile.coord.q);
+    const worldY = size * ((Math.sqrt(3) / 2) * tile.coord.q + Math.sqrt(3) * tile.coord.r);
+    const canvasX = (worldX - camera.worldView.x) * camera.zoom;
+    const canvasY = (worldY - camera.worldView.y) * camera.zoom;
+    const canvasRect = canvas.getBoundingClientRect();
+    const parentRect = this.buttonContainer.getBoundingClientRect();
+    return {
+      x: canvasRect.left - parentRect.left + canvasX,
+      y: canvasRect.top - parentRect.top + canvasY,
+    };
+  }
+
+  private getPlayerCardScreenPosition(playerId: string): { x: number; y: number } | null {
+    if (!this.playerPanel || !this.buttonContainer) {
+      return null;
+    }
+    const card = this.playerPanel.querySelector(`[data-player-id="${playerId}"]`) as HTMLDivElement | null;
+    if (!card) {
+      return null;
+    }
+    const rect = card.getBoundingClientRect();
+    const parentRect = this.buttonContainer.getBoundingClientRect();
+    return {
+      x: rect.left - parentRect.left + (rect.width / 2),
+      y: rect.top - parentRect.top + (rect.height / 2),
+    };
+  }
+
+  private maybeAnimateResourceDistribution(previousState: GameState | null, nextState: GameState | null): void {
+    if (!previousState || !nextState) {
+      return;
+    }
+    const previousRollAt = previousState.turn.lastDiceRoll?.rolledAt ?? null;
+    const nextRoll = nextState.turn.lastDiceRoll;
+    if (!nextRoll || nextRoll.rolledAt === previousRollAt) {
+      return;
+    }
+
+    const gainsByPlayer = new Map<string, Partial<Record<ResourceKey, number>>>();
+    nextState.playerOrder.forEach((playerId) => {
+      const nextResources = nextState.playersById[playerId]?.resources;
+      const prevResources = previousState.playersById[playerId]?.resources;
+      if (!nextResources || !prevResources) {
+        return;
+      }
+      RESOURCE_KEYS.forEach((resourceKey) => {
+        const delta = inventoryCount(nextResources[resourceKey]) - inventoryCount(prevResources[resourceKey]);
+        if (delta > 0) {
+          const entry = gainsByPlayer.get(playerId) ?? {};
+          entry[resourceKey] = (entry[resourceKey] ?? 0) + delta;
+          gainsByPlayer.set(playerId, entry);
+        }
+      });
+    });
+    if (gainsByPlayer.size === 0) {
+      return;
+    }
+
+    const grants = this.resolveResourceGrantsFromBoard(nextState, nextRoll.sum);
+    console.log('[ResourcePopDebug] Grant resolution', {
+      livePlayerId: this.livePlayerId,
+      grantCount: grants.length,
+      matchingLocalGrantCount: grants.filter((g) => g.playerId === this.livePlayerId).length,
+    });
+    let staggerIndex = 0;
+    grants.forEach((grant) => {
+      const playerTotals = gainsByPlayer.get(grant.playerId);
+      if (!playerTotals) {
+        return;
+      }
+      if ((playerTotals[grant.resource] ?? 0) <= 0) {
+        return;
+      }
+      playerTotals[grant.resource] = Math.max(0, (playerTotals[grant.resource] ?? 0) - 1);
+      const start = this.getTileScreenPosition(grant.tileId);
+      const end = this.getPlayerCardScreenPosition(grant.playerId);
+      if (!start || !end) {
+        return;
+      }
+      this.spawnResourceParticle(grant.resource, start, end, staggerIndex);
+      if (grant.playerId === this.livePlayerId) {
+        this.queueResourceBarPop(grant.resource);
+      }
+      staggerIndex += 1;
+    });
+  }
+
+  private queueResourceBarPop(resource: ResourceKey): void {
+    this.pendingResourceBarPops.push(resource);
+    requestAnimationFrame(() => this.flushPendingResourceBarPops());
+  }
+
+  private flushPendingResourceBarPops(): void {
+    if (!this.resourceBarLeft || this.pendingResourceBarPops.length === 0) {
+      return;
+    }
+    const queued = [...this.pendingResourceBarPops];
+    this.pendingResourceBarPops = [];
+    queued.forEach((resourceKey) => {
+      const button = this.resourceBarLeft?.querySelector(
+        `[data-resource-key="${resourceKey}"]`,
+      ) as HTMLButtonElement | null;
+      if (button) {
+        console.log('[ResourcePopDebug] Popping resource button from grant event', { resource: resourceKey });
+        this.animateResourceGainButton(button);
+      }
+    });
+  }
+
+  private resolveResourceGrantsFromBoard(
+    gameState: GameState,
+    diceSum: number,
+  ): Array<{ tileId: string; playerId: string; resource: ResourceKey }> {
+    const grants: Array<{ tileId: string; playerId: string; resource: ResourceKey }> = [];
+    Object.values(gameState.board.tilesById).forEach((tile) => {
+      if (tile.numberToken !== diceSum || tile.resourceType === 'DESERT') {
+        return;
+      }
+      const resource = tile.resourceType as ResourceKey;
+      const vertexIds = new Set(tile.vertices);
+      Object.values(gameState.board.structuresById).forEach((structure) => {
+        if (structure.type !== 'SETTLEMENT' && structure.type !== 'CITY') {
+          return;
+        }
+        const vertexId = structure.vertex?.id;
+        if (!vertexId || !vertexIds.has(vertexId)) {
+          return;
+        }
+        const amount = structure.type === 'CITY' ? 2 : 1;
+        for (let i = 0; i < amount; i += 1) {
+          grants.push({ tileId: tile.tileId, playerId: structure.ownerPlayerId, resource });
+        }
+      });
+    });
+    return grants;
+  }
+
+  private spawnResourceParticle(
+    resource: ResourceKey,
+    start: { x: number; y: number },
+    end: { x: number; y: number },
+    staggerIndex: number,
+  ): void {
+    if (!this.resourceFxLayer) {
+      return;
+    }
+    const cfg = RESOURCE_BOX_CONFIG.find((item) => item.key === resource);
+    if (!cfg) {
+      return;
+    }
+
+    const token = document.createElement('div');
+    token.style.position = 'absolute';
+    token.style.left = `${start.x}px`;
+    token.style.top = `${start.y}px`;
+    token.style.width = '24px';
+    token.style.height = '24px';
+    token.style.transform = 'translate(-50%, -50%) scale(0.75)';
+    token.style.opacity = '0';
+    token.style.filter = `drop-shadow(0 0 7px ${cfg.color})`;
+    if (cfg.iconSrc) {
+      const img = document.createElement('img');
+      img.src = cfg.iconSrc;
+      img.alt = '';
+      img.draggable = false;
+      img.style.width = '100%';
+      img.style.height = '100%';
+      img.style.objectFit = 'contain';
+      token.appendChild(img);
+    } else {
+      token.style.borderRadius = '999px';
+      token.style.border = `1px solid ${cfg.boxBorder}`;
+      token.style.background = cfg.boxBg;
+    }
+    this.resourceFxLayer.appendChild(token);
+
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const delayMs = Math.min(220, staggerIndex * 45);
+    const timerId = window.setTimeout(() => {
+      token.animate(
+        [
+          { transform: 'translate(-50%, -50%) scale(0.75)', opacity: 0 },
+          { transform: 'translate(-50%, -50%) scale(1)', opacity: 1, offset: 0.15 },
+          { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0.95)`, opacity: 1, offset: 0.85 },
+          { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(1.1)`, opacity: 0 },
+        ],
+        {
+          duration: 3000,
+          easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+          fill: 'forwards',
+        },
+      ).onfinish = () => token.remove();
+    }, delayMs);
+    this.activeResourceFxTimers.push(timerId);
+  }
+
+  private animateResourceGainButton(button: HTMLButtonElement): void {
+    button.getAnimations().forEach((anim) => anim.cancel());
+    button.style.transformOrigin = 'center center';
+    button.style.transition =
+      'transform 220ms cubic-bezier(0.16, 1, 0.3, 1), filter 220ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 220ms cubic-bezier(0.16, 1, 0.3, 1)';
+    // Fallback visual pulse path: apply styles immediately, then settle back.
+    button.style.transform = 'scale(1.4)';
+    button.style.filter = 'brightness(1.35)';
+    button.style.boxShadow = '0 0 0 2px rgba(250, 204, 21, 0.45), 0 0 16px rgba(250, 204, 21, 0.85)';
+    const settleTimer = window.setTimeout(() => {
+      button.style.transform = 'scale(1)';
+      button.style.filter = 'brightness(1)';
+      button.style.boxShadow = '0 0 0 rgba(0,0,0,0)';
+    }, 260);
+    this.activeResourceFxTimers.push(settleTimer);
+
+    button.animate(
+      [
+        { transform: 'scale(1)', filter: 'brightness(1)', boxShadow: '0 0 0 rgba(0,0,0,0)' },
+        {
+          transform: 'scale(1.4)',
+          filter: 'brightness(1.35)',
+          boxShadow: '0 0 0 2px rgba(250, 204, 21, 0.45), 0 0 16px rgba(250, 204, 21, 0.85)',
+          offset: 0.28,
+        },
+        {
+          transform: 'scale(1.18)',
+          filter: 'brightness(1.15)',
+          boxShadow: '0 0 0 1px rgba(250, 204, 21, 0.32), 0 0 10px rgba(250, 204, 21, 0.45)',
+          offset: 0.6,
+        },
+        { transform: 'scale(1)', filter: 'brightness(1)', boxShadow: '0 0 0 rgba(0,0,0,0)' },
+      ],
+      {
+        duration: 950,
+        easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
+      },
+    );
+
+    const iconEl = button.querySelector('img') as HTMLImageElement | null;
+    if (iconEl) {
+      iconEl.getAnimations().forEach((anim) => anim.cancel());
+      iconEl.style.transition = 'transform 220ms cubic-bezier(0.16, 1, 0.3, 1)';
+      iconEl.style.transform = 'scale(1.18) rotate(-7deg)';
+      const iconSettleTimer = window.setTimeout(() => {
+        iconEl.style.transform = 'scale(1) rotate(0deg)';
+      }, 240);
+      this.activeResourceFxTimers.push(iconSettleTimer);
+      iconEl.animate(
+        [
+          { transform: 'scale(1) rotate(0deg)' },
+          { transform: 'scale(1.18) rotate(-7deg)', offset: 0.3 },
+          { transform: 'scale(1.08) rotate(5deg)', offset: 0.62 },
+          { transform: 'scale(1) rotate(0deg)' },
+        ],
+        {
+          duration: 900,
+          easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)',
+        },
+      );
+    }
+  }
+
   private renderResourceBarFromGameState(): void {
     const gameState = this.liveGameState;
     if (!this.resourceBarLeft || !gameState) {
       return;
     }
+    const previousRenderedCounts: Partial<Record<ResourceKey, number>> = this.lastRenderedResourceCounts ?? {};
     this.resourceBarLeft.innerHTML = '';
 
     const viewerId = this.livePlayerId;
@@ -1020,6 +1320,7 @@ export class GameBoardScreen {
     }
 
     this.clampResourceSelectionToInventory(player.resources);
+    const gainedButtons: HTMLButtonElement[] = [];
 
     RESOURCE_BOX_CONFIG.forEach(
       ({ key, shortLabel, color, iconSrc, boxBg, boxBorder, boxHoverBg, countColor }) => {
@@ -1027,6 +1328,8 @@ export class GameBoardScreen {
         const selected = inventoryCount(this.resourceSelection[key]);
         const btn = document.createElement('button');
         btn.type = 'button';
+        btn.dataset.resourceKey = key;
+        btn.dataset.resourceCount = String(owned);
         btn.className =
           'flex w-[42px] shrink-0 flex-col items-center justify-center gap-0.5 self-stretch rounded-md border px-1 py-1.5 shadow-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 cursor-pointer';
         btn.style.backgroundColor = boxBg;
@@ -1065,8 +1368,39 @@ export class GameBoardScreen {
         btn.appendChild(count);
 
         this.resourceBarLeft?.appendChild(btn);
+        const previousOwned = inventoryCount(previousRenderedCounts[key]);
+        const delta = owned - previousOwned;
+        console.log('[ResourcePopDebug] Resource bar delta check', {
+          resource: key,
+          previousOwned,
+          owned,
+          delta,
+          shouldPop: delta > 0,
+          playerId: viewerId,
+        });
+        if (delta > 0) {
+          gainedButtons.push(btn);
+        }
       },
     );
+    this.lastRenderedResourceCounts = RESOURCE_KEYS.reduce((acc, key) => {
+      acc[key] = inventoryCount(player.resources[key]);
+      return acc;
+    }, {} as Partial<Record<ResourceKey, number>>);
+    this.lastResourceSnapshot = { ...player.resources };
+    if (gainedButtons.length > 0) {
+      console.log('[ResourcePopDebug] Triggering pop animation for resource buttons', {
+        count: gainedButtons.length,
+        resources: gainedButtons.map((btn) => btn.dataset.resourceKey),
+      });
+      requestAnimationFrame(() => {
+        gainedButtons.forEach((btn) => this.animateResourceGainButton(btn));
+        this.flushPendingResourceBarPops();
+      });
+    } else {
+      console.log('[ResourcePopDebug] No resource button pop triggered this render');
+      this.flushPendingResourceBarPops();
+    }
   }
 
   private clampResourceSelectionToInventory(inv: ResourceBundle): void {
@@ -2084,6 +2418,13 @@ export class GameBoardScreen {
   }
 
   destroy(): void {
+    this.activeResourceFxTimers.forEach((timerId) => clearTimeout(timerId));
+    this.activeResourceFxTimers = [];
+    this.pendingResourceBarPops = [];
+    if (this.resourceFxLayer) {
+      this.resourceFxLayer.remove();
+      this.resourceFxLayer = null;
+    }
     this.dismissBuildRecipePopover();
     this.closeGameSettingsPanel();
     this.closeGameRulesPanel();
@@ -2159,6 +2500,8 @@ export class GameBoardScreen {
     this.mapScreen = null;
     this.liveGameState = null;
     this.livePlayerId = null;
+    this.lastResourceSnapshot = null;
+    this.lastRenderedResourceCounts = null;
     this.pendingBuild = null;
     this.resourceSelection = emptyResourceBundle();
   }
