@@ -8,8 +8,10 @@ import type { DiceRoll, GamePhase, GameState, ResourceBundle } from '../../share
 import { bankTrade, buildStructure, connectSocket, disconnectSocket, endTurn, hydrateSession, rollDice, sendChatMessage } from '../networking/socketClient';
 import { clientState, resetClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
-import { createDiceHud, type DiceHud } from '../ui/diceRollDisplay';
+
 import { TestMapGenScreen, type MapPointerHit } from './TestMapGenScreen';
+import { createDiceHud, type DiceHud } from '../ui/diceRollDisplay';
+
 
 type ResourceKey = keyof ResourceBundle;
 
