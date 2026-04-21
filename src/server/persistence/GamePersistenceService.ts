@@ -226,35 +226,109 @@ function violatesDistanceRule(gameState: GameState, vertexId: string): boolean {
   );
 }
 
-function edgeSharesVertex(existingEdgeId: string, candidateEdgeId: string): boolean {
-  const existing = parseEdgeId(existingEdgeId);
-  const candidate = parseEdgeId(candidateEdgeId);
-  if (existing === null || candidate === null) {
+function edgeTouchesVertex(edgeId: string, vertexId: string): boolean {
+  const parsed = parseEdgeId(edgeId);
+  if (parsed === null) {
     return false;
   }
 
-  return existing[0] === candidate[0]
-    || existing[0] === candidate[1]
-    || existing[1] === candidate[0]
-    || existing[1] === candidate[1];
+  return parsed[0] === vertexId || parsed[1] === vertexId;
 }
 
-function canPlaceRoad(gameState: GameState, playerId: string, edgeId: string): boolean {
+function isRoadTouchingVertex(structure: StructureState, vertexId: string): boolean {
+  if (structure.type !== 'ROAD' || !structure.edge) {
+    return false;
+  }
+  if (structure.edge.vertexIds?.includes(vertexId)) {
+    return true;
+  }
+  return edgeTouchesVertex(structure.edge.id, vertexId);
+}
+
+function canConnectRoadFromVertex(
+  gameState: GameState,
+  playerId: string,
+  vertexId: string,
+  candidateEdgeId: string,
+): boolean {
+  const structureAtVertex = resolveStructureAtVertex(gameState, vertexId);
+  if (
+    structureAtVertex
+    && (structureAtVertex.type === 'SETTLEMENT' || structureAtVertex.type === 'CITY')
+    && structureAtVertex.ownerPlayerId !== playerId
+  ) {
+    return false;
+  }
+
+  if (
+    structureAtVertex
+    && (structureAtVertex.type === 'SETTLEMENT' || structureAtVertex.type === 'CITY')
+    && structureAtVertex.ownerPlayerId === playerId
+  ) {
+    return true;
+  }
+
+  return Object.values(gameState.board.structuresById).some(
+    (structure) =>
+      structure.ownerPlayerId === playerId
+      && structure.type === 'ROAD'
+      && structure.edge?.id !== candidateEdgeId
+      && isRoadTouchingVertex(structure, vertexId),
+  );
+}
+
+function playerHasRoadTouchingVertex(gameState: GameState, playerId: string, vertexId: string): boolean {
+  return Object.values(gameState.board.structuresById).some(
+    (structure) =>
+      structure.ownerPlayerId === playerId
+      && structure.type === 'ROAD'
+      && isRoadTouchingVertex(structure, vertexId),
+  );
+}
+
+export function validateSettlementPlacement(
+  gameState: GameState,
+  playerId: string,
+  vertexId: string,
+): 'OCCUPIED' | 'DISTANCE_RULE' | 'ROAD_CONNECTION_REQUIRED' | null {
+  if (resolveStructureAtVertex(gameState, vertexId)) {
+    return 'OCCUPIED';
+  }
+  if (violatesDistanceRule(gameState, vertexId)) {
+    return 'DISTANCE_RULE';
+  }
+
+  const playerStructures = Object.values(gameState.board.structuresById).filter(
+    (s) => s.ownerPlayerId === playerId,
+  );
+  const hasExistingSettlement = playerStructures.some(
+    (s) => s.type === 'SETTLEMENT' || s.type === 'CITY',
+  );
+  if (hasExistingSettlement && !playerHasRoadTouchingVertex(gameState, playerId, vertexId)) {
+    return 'ROAD_CONNECTION_REQUIRED';
+  }
+
+  return null;
+}
+
+export function canUpgradeSettlementToCity(gameState: GameState, playerId: string, vertexId: string): boolean {
+  const structureAtVertex = resolveStructureAtVertex(gameState, vertexId);
+  return Boolean(
+    structureAtVertex
+    && structureAtVertex.ownerPlayerId === playerId
+    && structureAtVertex.type === 'SETTLEMENT',
+  );
+}
+
+export function canPlaceRoad(gameState: GameState, playerId: string, edgeId: string): boolean {
   const parsed = parseEdgeId(edgeId);
   if (parsed === null) {
     return false;
   }
 
   const [leftVertexId, rightVertexId] = parsed;
-  const playerStructures = Object.values(gameState.board.structuresById).filter(
-    (structure) => structure.ownerPlayerId === playerId,
-  );
-
-  if (playerStructures.some((structure) => structure.vertex?.id === leftVertexId || structure.vertex?.id === rightVertexId)) {
-    return true;
-  }
-
-  return playerStructures.some((structure) => structure.edge && edgeSharesVertex(structure.edge.id, edgeId));
+  return canConnectRoadFromVertex(gameState, playerId, leftVertexId, edgeId)
+    || canConnectRoadFromVertex(gameState, playerId, rightVertexId, edgeId);
 }
 
 function buildResourceCollection(gameState: GameState, sum: number): Map<string, ResourceBundle> {
@@ -556,26 +630,18 @@ export class GamePersistenceService {
       if (!request.vertexId || !boardHasVertex(gameState, request.vertexId)) {
         throw new Error('Invalid settlement location');
       }
-      if (resolveStructureAtVertex(gameState, request.vertexId)) {
+      const settlementPlacementError = validateSettlementPlacement(gameState, playerId, request.vertexId);
+      if (settlementPlacementError === 'OCCUPIED') {
         throw new Error('That settlement location is already occupied');
       }
-      if (violatesDistanceRule(gameState, request.vertexId)) {
+      if (settlementPlacementError === 'DISTANCE_RULE') {
         throw new Error('Settlements must be at least two roads apart');
       }
-
-      const playerStructures = Object.values(gameState.board.structuresById).filter(
-        (s) => s.ownerPlayerId === playerId,
-      );
-      const hasExistingSettlement = playerStructures.some(
-        (s) => s.type === 'SETTLEMENT' || s.type === 'CITY',
-      );
-      if (hasExistingSettlement) {
-        const connectedByRoad = playerStructures.some(
-          (s) => s.type === 'ROAD' && s.edge?.vertexIds?.includes(request.vertexId!),
-        );
-        if (!connectedByRoad) {
-          throw new Error('Settlements must connect to one of your existing roads');
-        }
+      if (settlementPlacementError === 'ROAD_CONNECTION_REQUIRED') {
+        throw new Error('Settlements must connect to one of your existing roads');
+      }
+      if (settlementPlacementError !== null) {
+        throw new Error('Invalid settlement location');
       }
 
       const vertex = buildVertexLocationFromId(request.vertexId);
@@ -607,7 +673,7 @@ export class GamePersistenceService {
       }
 
       const existingStructure = resolveStructureAtVertex(gameState, request.vertexId);
-      if (!existingStructure || existingStructure.ownerPlayerId !== playerId || existingStructure.type !== 'SETTLEMENT') {
+      if (!existingStructure || !canUpgradeSettlementToCity(gameState, playerId, request.vertexId)) {
         throw new Error('You can only upgrade your own settlement');
       }
 
