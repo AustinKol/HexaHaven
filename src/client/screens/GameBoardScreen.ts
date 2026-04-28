@@ -198,6 +198,7 @@ export class GameBoardScreen {
   private turnTimerTicker: number | null = null;
   private lastTimerTurnKey: string | null = null;
   private nearTimeoutTickSecond: number | null = null;
+  private autoEndTurnRequestedKey: string | null = null;
   private diceHud: DiceHud | null = null;
   /** Local roll: waiting for server `lastDiceRoll` after clicking Roll. */
   private expectingLocalDiceAck = false;
@@ -310,6 +311,7 @@ export class GameBoardScreen {
     if (turnKey && turnKey !== this.lastTimerTurnKey) {
       this.lastTimerTurnKey = turnKey;
       this.nearTimeoutTickSecond = null;
+      this.autoEndTurnRequestedKey = null;
     }
 
     const turnEndsAtMs = this.resolveTurnEndsAtMs(gameState);
@@ -339,6 +341,20 @@ export class GameBoardScreen {
       this.turnTimerValue.style.background = 'rgba(8, 47, 73, 0.9)';
       this.turnTimerValue.style.borderColor = 'rgba(34, 211, 238, 0.85)';
       this.turnTimerValue.style.color = '#cffafe';
+    }
+
+    // Client-side fallback: ensure timeout hands off turn once at 00:00.
+    if (remainingMs === 0 && turnKey && turnKey !== this.autoEndTurnRequestedKey) {
+      const isActivePlayer = Boolean(activePlayerId && this.livePlayerId && activePlayerId === this.livePlayerId);
+      const canAutoEndTurn = Boolean(
+        isActivePlayer
+        && gameState?.turn.phase === 'ACTION'
+        && gameState.turn.lastDiceRoll !== null,
+      );
+      if (canAutoEndTurn) {
+        this.autoEndTurnRequestedKey = turnKey;
+        this.handleEndTurnClick();
+      }
     }
   }
 
