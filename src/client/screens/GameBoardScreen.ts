@@ -1463,6 +1463,7 @@ export class GameBoardScreen {
     inventory: ResourceBundle,
   ): void {
     this.dismissBuildRecipePopover();
+    const canBuildNow = canAffordCost(inventory, cost);
 
     const panel = document.createElement('div');
     panel.className =
@@ -1475,18 +1476,12 @@ export class GameBoardScreen {
     title.textContent = label;
     panel.appendChild(title);
 
-    const warn = document.createElement('div');
-    warn.className =
-      'mt-2 rounded-md border border-amber-500/55 bg-amber-950/45 px-2 py-1.5 text-[11px] leading-snug text-amber-100';
-    warn.textContent =
-      "You can't build this yet — you don't have enough resources. Dimmed slots are what you're missing.";
-    panel.appendChild(warn);
-
-    const sub = document.createElement('div');
-    sub.className = 'mt-2 text-[11px] leading-snug text-slate-400';
-    sub.textContent =
-      'Bright = you have enough in your inventory for that resource; dim = need more.';
-    panel.appendChild(sub);
+    const status = document.createElement('div');
+    status.className = canBuildNow
+      ? 'mt-2 rounded-md border border-emerald-500/60 bg-emerald-950/45 px-2 py-1.5 text-[11px] leading-snug text-emerald-100'
+      : 'mt-2 rounded-md border border-amber-500/55 bg-amber-950/45 px-2 py-1.5 text-[11px] leading-snug text-amber-100';
+    status.textContent = canBuildNow ? 'Ready to build!' : 'Not enough resources.';
+    panel.appendChild(status);
 
     const row = document.createElement('div');
     row.className = 'mt-2 flex flex-wrap items-center gap-2';
@@ -1618,28 +1613,22 @@ export class GameBoardScreen {
         btn.appendChild(img);
       }
       btn.addEventListener('click', () => {
-        if (ready) {
-          this.togglePendingBuild(kind, cost);
-        } else if (this.buildRecipePopoverEl && this.buildRecipePopoverAnchor === btn) {
+        const clickedSamePopoverButton = this.buildRecipePopoverEl && this.buildRecipePopoverAnchor === btn;
+        if (clickedSamePopoverButton) {
           this.dismissBuildRecipePopover();
-        } else {
-          this.showBuildRecipePopover(btn, label, cost, player.resources);
+          return;
         }
+        if (ready) {
+          this.pendingBuild = this.pendingBuild?.kind === kind ? null : { kind, cost };
+          this.updateMapDisplay();
+        } else if (this.pendingBuild?.kind === kind) {
+          this.pendingBuild = null;
+          this.updateMapDisplay();
+        }
+        this.showBuildRecipePopover(btn, label, cost, player.resources);
       });
       this.resourceBarRight?.appendChild(btn);
     });
-  }
-
-  private togglePendingBuild(kind: BuildKind, cost: ResourceBundle): void {
-    this.dismissBuildRecipePopover();
-    if (this.pendingBuild?.kind === kind) {
-      this.pendingBuild = null;
-    } else {
-      this.pendingBuild = { kind, cost };
-    }
-    console.log('[Settlement] Toggle pending build:', this.pendingBuild);
-    this.refreshPlayerUi();
-    this.updateMapDisplay();
   }
 
   private handleMapPlaceClick(hit: MapPointerHit): void {
