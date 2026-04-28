@@ -3,13 +3,13 @@
 HexaHaven is a turn-based strategy hex game built with Phaser, Vite, and Socket.IO.  
 Players share a room key, join a lobby, and compete on a hexagonal map where tile outcomes and resources are driven by dice rolls.
 
-Deployed on: https://hexa-haven.vercel.app/
-
-Backend deployed on Google Cloud Run
+🌐 Deployed on: https://hexa-haven.vercel.app/  
+☁️ Backend deployed on Google Cloud Run
 
 ## Game Screen
 
-![HexaHaven gameplay screenshot](./docs/images/game-screen.png)
+![HexaHaven gameplay screenshot](https://github.com/user-attachments/assets/50dad0e4-dbd9-465b-8afb-30784e531860)
+
 
 ## Rules
 
@@ -21,8 +21,7 @@ Backend deployed on Google Cloud Run
    - Place settlements
    - Upgrade settlements
    - Construct special structures
-5. **Goals:** each player is assigned 3 goals.
-6. **Win condition:** the first player to complete all 3 goals wins.
+5. **Win condition:** the first player to achieve 10 victory points (VP).
 
 ## How to Build
 Run all commands below from the project root folder:
@@ -53,24 +52,15 @@ npm run dev
 ```
 
 This starts:
-- Client (Vite) at `http://localhost:8080`
-- Server (Express + Socket.IO) at `http://localhost:3000`
+- Client (Vite): `http://localhost:8080`
+- Server (Express + Socket.IO): `http://localhost:3000`
 
 ### Play flow
 
-1. Open `http://localhost:8080`.
-2. Choose **Host Game** and enter your name to generate a 6-character game key.
-3. Other players choose **Join Game**, enter their name and game key.
-4. Host starts the game from the waiting room once at least one other player joins.
-5. In-game, use the Turn HUD:
-   - Click **Roll Dice** during your ROLL phase.
-   - Click **End Turn** during your ACTION phase.
-
-## Useful Dev Commands
-
-```bash
-npm run dev          # start client + server together
-npm run dev:client   # start client only
-npm run dev:server   # start server only
-npm run build        # build production client bundle
-```
+2. Choose **Host Game**, enter your name, and pick a game size (**2**, **3**, or **4** players).
+3. Click **Create Game Key** and share the 6-character key with other players.
+4. Other players choose **Join Game**, enter their name + key, and join the waiting room.
+5. The host clicks **Start Game** once at least 2 players are in the room.
+6. During your turn:
+   - **ROLL** phase: click **Roll Dice**.
+   - **ACTION** phase: build, bank trade (`4:1`), chat, then click **End Turn**.
