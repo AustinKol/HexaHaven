@@ -2266,55 +2266,66 @@ export class GameBoardScreen {
     body.style.display = 'grid';
     body.style.gap = '14px';
     body.style.color = '#e2e8f0';
-    body.style.fontSize = '14px';
-    body.style.lineHeight = '1.55';
+    body.style.fontSize = '16px';
+    body.style.lineHeight = '1.65';
+    body.style.fontFamily = '"CSRobert Mono Demo", monospace';
+
+    const buildCostRows: { item: string; cost: string; iconSrc: string }[] = [
+      { item: 'Road', cost: 'ember + stone', iconSrc: '/images/buildings/road.png' },
+      { item: 'Settlement', cost: 'ember + bloom + stone', iconSrc: '/images/buildings/settlement.png' },
+      { item: 'City', cost: '3 stone + 2 bloom', iconSrc: '/images/buildings/city.png' },
+      { item: 'Dev Card', cost: '2 crystal + 2 gold', iconSrc: '/images/buildings/dev-card.png' },
+    ];
+
+    const buildingRuleRows: { label: string; text: string; iconSrc: string }[] = [
+      {
+        label: 'Roads',
+        text: "Must connect to your network and cannot pass through another player's settlement.",
+        iconSrc: '/images/buildings/road.png',
+      },
+      {
+        label: 'Settlements',
+        text: 'Must connect to your road and follow the distance rule.',
+        iconSrc: '/images/buildings/settlement.png',
+      },
+      {
+        label: 'Cities',
+        text: 'Replace settlements and produce 2 resources.',
+        iconSrc: '/images/buildings/city.png',
+      },
+    ];
+
+    const resources: { label: string; iconSrc: string }[] = [
+      { label: 'Ember', iconSrc: '/images/resources/ember.png' },
+      { label: 'Stone', iconSrc: '/images/resources/stone.png' },
+      { label: 'Bloom', iconSrc: '/images/resources/bloom.png' },
+      { label: 'Crystal', iconSrc: '/images/resources/crystal.png' },
+      { label: 'Gold', iconSrc: '/images/resources/gold.png' },
+    ];
+
+    const victoryPointRows: { label: string; value: string; iconSrc: string }[] = [
+      { label: 'Settlement', value: '1 VP', iconSrc: '/images/buildings/settlement.png' },
+      { label: 'City', value: '2 VP', iconSrc: '/images/buildings/city.png' },
+      { label: 'Longest Road', value: '2 VP (minimum 5 roads)', iconSrc: '/images/buildings/road.png' },
+      { label: 'VP Card', value: '1 VP each', iconSrc: '/images/buildings/dev-card.png' },
+    ];
 
     const sections: { heading: string; lines: string[] }[] = [
       { heading: 'Objective', lines: ['First to 10 Victory Points (VP) wins.'] },
       {
-        heading: 'Setup',
+        heading: 'Rolling',
         lines: [
-          'Each player places 1 settlement + 1 road, then repeats in the same order.',
-          'Settlements must be at least 2 edges apart.',
-          'Gain 1 resource per hex next to your second settlement.',
+          'Roll 2 dice at the start of your turn.',
+          'Tiles matching the rolled number produce resources for adjacent buildings.',
+          'Settlements produce 1 resource; cities produce 2 resources.',
         ],
       },
       {
-        heading: 'Turn Flow',
+        heading: 'Trading',
         lines: [
-          'Roll: Roll 2 dice. Matching tiles produce resources.',
-          'Trade: Trade with players or bank (4 same -> 1 any).',
-          'Build: Spend resources to place roads, settlements, cities, or buy dev cards.',
-        ],
-      },
-      {
-        heading: 'Build Costs',
-        lines: [
-          'Road: ember + stone',
-          'Settlement: ember + bloom + stone',
-          'City: 3 stone + 2 bloom',
-          'Dev Card: 2 crystal + 2 gold',
-        ],
-      },
-      {
-        heading: 'Building Rules',
-        lines: [
-          "Roads must connect to your network and can't pass through another player's settlement.",
-          'Settlements must connect to your road and follow the distance rule.',
-          'Cities replace settlements and produce 2 resources.',
-        ],
-      },
-      {
-        heading: 'Development Cards',
-        lines: [
-          'Types: VP, Road Building, Year of Plenty, Monopoly.',
-          'Cannot use the turn you buy (except VP cards).',
-        ],
-      },
-      {
-        heading: 'Victory Points',
-        lines: [
-          'Settlement = 1 VP, City = 2 VP, Longest Road = 2 VP (minimum 5), VP cards = 1 VP each.',
+          'Trade with other players if they agree.',
+          'Trade with the bank at 4 of the same resource for 1 of any resource.',
+          'Complete trades before or after building during your turn.',
         ],
       },
     ];
@@ -2323,8 +2334,9 @@ export class GameBoardScreen {
       const section = document.createElement('section');
       const h = document.createElement('h3');
       h.style.margin = '0 0 6px 0';
-      h.style.fontSize = '13px';
+      h.style.fontSize = '15px';
       h.style.fontWeight = '700';
+      h.style.fontFamily = '"04B_30__", monospace';
       h.style.textTransform = 'uppercase';
       h.style.letterSpacing = '0.06em';
       h.style.color = '#fde68a';
@@ -2343,6 +2355,147 @@ export class GameBoardScreen {
       section.appendChild(ul);
       body.appendChild(section);
     });
+
+    const buildCostsSection = document.createElement('section');
+    const buildCostsHeading = document.createElement('h3');
+    buildCostsHeading.style.margin = '0 0 6px 0';
+    buildCostsHeading.style.fontSize = '15px';
+    buildCostsHeading.style.fontWeight = '700';
+    buildCostsHeading.style.fontFamily = '"04B_30__", monospace';
+    buildCostsHeading.style.textTransform = 'uppercase';
+    buildCostsHeading.style.letterSpacing = '0.06em';
+    buildCostsHeading.style.color = '#fde68a';
+    buildCostsHeading.textContent = 'Build Costs';
+    buildCostsSection.appendChild(buildCostsHeading);
+    const buildCostsList = document.createElement('div');
+    buildCostsList.style.display = 'grid';
+    buildCostsList.style.gap = '8px';
+    buildCostRows.forEach(({ item, cost, iconSrc }) => {
+      const row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.alignItems = 'center';
+      row.style.gap = '10px';
+      const icon = document.createElement('img');
+      icon.src = iconSrc;
+      icon.alt = `${item} icon`;
+      icon.style.width = '24px';
+      icon.style.height = '24px';
+      icon.style.objectFit = 'contain';
+      const text = document.createElement('span');
+      text.textContent = `${item}: ${cost}`;
+      row.appendChild(icon);
+      row.appendChild(text);
+      buildCostsList.appendChild(row);
+    });
+    buildCostsSection.appendChild(buildCostsList);
+    body.appendChild(buildCostsSection);
+
+    const buildingRulesVisualSection = document.createElement('section');
+    const buildingRulesVisualHeading = document.createElement('h3');
+    buildingRulesVisualHeading.style.margin = '0 0 6px 0';
+    buildingRulesVisualHeading.style.fontSize = '15px';
+    buildingRulesVisualHeading.style.fontWeight = '700';
+    buildingRulesVisualHeading.style.fontFamily = '"04B_30__", monospace';
+    buildingRulesVisualHeading.style.textTransform = 'uppercase';
+    buildingRulesVisualHeading.style.letterSpacing = '0.06em';
+    buildingRulesVisualHeading.style.color = '#fde68a';
+    buildingRulesVisualHeading.textContent = 'Building Rules';
+    buildingRulesVisualSection.appendChild(buildingRulesVisualHeading);
+    const buildingRuleList = document.createElement('div');
+    buildingRuleList.style.display = 'grid';
+    buildingRuleList.style.gap = '8px';
+    buildingRuleRows.forEach(({ label, text, iconSrc }) => {
+      const row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.alignItems = 'flex-start';
+      row.style.gap = '10px';
+      const icon = document.createElement('img');
+      icon.src = iconSrc;
+      icon.alt = `${label} icon`;
+      icon.style.width = '24px';
+      icon.style.height = '24px';
+      icon.style.objectFit = 'contain';
+      const line = document.createElement('span');
+      line.textContent = `${label}: ${text}`;
+      row.appendChild(icon);
+      row.appendChild(line);
+      buildingRuleList.appendChild(row);
+    });
+    buildingRulesVisualSection.appendChild(buildingRuleList);
+    body.appendChild(buildingRulesVisualSection);
+
+    const resourcesSection = document.createElement('section');
+    const resourcesHeading = document.createElement('h3');
+    resourcesHeading.style.margin = '0 0 6px 0';
+    resourcesHeading.style.fontSize = '15px';
+    resourcesHeading.style.fontWeight = '700';
+    resourcesHeading.style.fontFamily = '"04B_30__", monospace';
+    resourcesHeading.style.textTransform = 'uppercase';
+    resourcesHeading.style.letterSpacing = '0.06em';
+    resourcesHeading.style.color = '#fde68a';
+    resourcesHeading.textContent = 'Resources';
+    resourcesSection.appendChild(resourcesHeading);
+    const resourcesGrid = document.createElement('div');
+    resourcesGrid.style.display = 'grid';
+    resourcesGrid.style.gridTemplateColumns = 'repeat(auto-fit, minmax(120px, 1fr))';
+    resourcesGrid.style.gap = '8px';
+    resources.forEach(({ label, iconSrc }) => {
+      const tile = document.createElement('div');
+      tile.style.display = 'flex';
+      tile.style.alignItems = 'center';
+      tile.style.gap = '8px';
+      tile.style.padding = '6px 8px';
+      tile.style.border = '1px solid rgba(148, 163, 184, 0.35)';
+      tile.style.borderRadius = '8px';
+      tile.style.background = 'rgba(30, 41, 59, 0.55)';
+      const icon = document.createElement('img');
+      icon.src = iconSrc;
+      icon.alt = `${label} resource icon`;
+      icon.style.width = '20px';
+      icon.style.height = '20px';
+      icon.style.objectFit = 'contain';
+      const text = document.createElement('span');
+      text.textContent = label;
+      tile.appendChild(icon);
+      tile.appendChild(text);
+      resourcesGrid.appendChild(tile);
+    });
+    resourcesSection.appendChild(resourcesGrid);
+    body.appendChild(resourcesSection);
+
+    const vpVisualSection = document.createElement('section');
+    const vpHeading = document.createElement('h3');
+    vpHeading.style.margin = '0 0 6px 0';
+    vpHeading.style.fontSize = '15px';
+    vpHeading.style.fontWeight = '700';
+    vpHeading.style.fontFamily = '"04B_30__", monospace';
+    vpHeading.style.textTransform = 'uppercase';
+    vpHeading.style.letterSpacing = '0.06em';
+    vpHeading.style.color = '#fde68a';
+    vpHeading.textContent = 'Victory Points';
+    vpVisualSection.appendChild(vpHeading);
+    const vpList = document.createElement('div');
+    vpList.style.display = 'grid';
+    vpList.style.gap = '8px';
+    victoryPointRows.forEach(({ label, value, iconSrc }) => {
+      const row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.alignItems = 'center';
+      row.style.gap = '10px';
+      const icon = document.createElement('img');
+      icon.src = iconSrc;
+      icon.alt = `${label} icon`;
+      icon.style.width = '24px';
+      icon.style.height = '24px';
+      icon.style.objectFit = 'contain';
+      const text = document.createElement('span');
+      text.textContent = `${label}: ${value}`;
+      row.appendChild(icon);
+      row.appendChild(text);
+      vpList.appendChild(row);
+    });
+    vpVisualSection.appendChild(vpList);
+    body.appendChild(vpVisualSection);
 
     const footer = document.createElement('div');
     footer.style.padding = '12px 20px 16px 20px';

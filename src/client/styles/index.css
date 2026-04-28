@@ -12,6 +12,12 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: "CSRobert Mono Demo";
+  src: url("/fonts/CSRobertMono-Regular_demo.otf") format("opentype");
+  font-display: swap;
+}
+
 .font-hexahaven-title {
   font-family: "04B_30__", monospace;
   letter-spacing: 0.08em;
