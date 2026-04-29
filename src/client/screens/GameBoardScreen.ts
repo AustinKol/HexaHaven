@@ -4,6 +4,7 @@ import { ClientEnv } from '../config/env';
 import { BUILD_COSTS } from '../../shared/buildRules';
 import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings } from '../settings/gameSettings';
 import { ScreenId } from '../../shared/constants/screenIds';
+import type { ActionRejectedEvent } from '../../shared/types/socket';
 import type { DiceRoll, GamePhase, GameState, ResourceBundle } from '../../shared/types/domain';
 import { bankTrade, buildStructure, connectSocket, disconnectSocket, endTurn, hydrateSession, rollDice, sendChatMessage } from '../networking/socketClient';
 import { clientState, resetClientState, subscribeClientState } from '../state/clientState';
@@ -100,6 +101,43 @@ function costEntriesForRecipe(cost: ResourceBundle): { key: ResourceKey; count: 
   return RESOURCE_KEYS.filter((k) => (cost[k] ?? 0) > 0).map((k) => ({ key: k, count: cost[k] ?? 0 }));
 }
 
+function normalizeRejectedMessage(message: string): string {
+  return message.trim().toLowerCase();
+}
+
+function toFriendlyBuildRejectionMessage(
+  rejection: Pick<ActionRejectedEvent, 'code' | 'message'>,
+): string {
+  const msg = normalizeRejectedMessage(rejection.message);
+  if (msg.includes('two roads apart') || msg.includes('distance')) {
+    return 'Illegal move! Settlements must be at least two roads apart.';
+  }
+  if (msg.includes('already occupied')) {
+    return 'Illegal move! That spot is already occupied.';
+  }
+  if (msg.includes('road must connect') || msg.includes('connect to one of your existing roads or structures')) {
+    return 'Illegal move! Roads must connect to your existing road or settlement.';
+  }
+  if (msg.includes('settlements must connect to one of your existing roads')) {
+    return 'Illegal move! Settlements must connect to your road network.';
+  }
+  if (rejection.code === 'INSUFFICIENT_RESOURCES' || msg.includes('insufficient resources') || msg.includes('need ')) {
+    return 'Not enough resources to build that.';
+  }
+  if (rejection.code === 'NOT_ACTIVE_PLAYER' || msg.includes('active player') || msg.includes('your turn')) {
+    return 'You can only build during your turn.';
+  }
+  if (
+    rejection.code === 'INVALID_PHASE'
+    || msg.includes('action phase')
+    || msg.includes('after rolling')
+    || msg.includes('builds are only allowed during the action phase')
+  ) {
+    return 'You can only build after rolling.';
+  }
+  return 'Illegal move! You cannot build there.';
+}
+
 /** Parses `#rgb` / `#rrggbb` for UI accents (player panel borders, etc.). */
 function hexToRgbComponents(hex: string): { r: number; g: number; b: number } | null {
   const h = hex.replace(/^#/, '').trim();
@@ -186,6 +224,13 @@ export class GameBoardScreen {
   private winnerKeydown: ((e: KeyboardEvent) => void) | null = null;
   private lastAnnouncedWinnerPlayerId: string | null = null;
   private isGameOver = false;
+  private buildRejectToastEl: HTMLDivElement | null = null;
+  private buildRejectToastTextEl: HTMLDivElement | null = null;
+  private buildRejectToastHideTimer: number | null = null;
+  private buildRejectToastCleanupTimer: number | null = null;
+  private lastRejectedBuildToastKey: string | null = null;
+  private lastBuildAttemptedAtMs = 0;
+  private awaitingBuildAck = false;
   private topRightContainer: HTMLElement | null = null;
   private playerPanel: HTMLDivElement | null = null;
   private resourceBar: HTMLDivElement | null = null;
@@ -236,7 +281,6 @@ export class GameBoardScreen {
   private pendingBuild: { kind: BuildKind; cost: ResourceBundle } | null = null;
   private liveGameState: GameState | null = null;
   private livePlayerId: string | null = null;
-  private lastResourceSnapshot: ResourceBundle | null = null;
   private lastRenderedResourceCounts: Partial<Record<ResourceKey, number>> | null = null;
   private resourceFxLayer: HTMLDivElement | null = null;
   private activeResourceFxTimers: number[] = [];
@@ -430,6 +474,7 @@ export class GameBoardScreen {
       return;
     }
     this.ensureResourceFxLayer(this.buttonContainer);
+    this.mountBuildRejectToast(this.buttonContainer);
     this.mountPlayerPanel(this.buttonContainer);
     this.mountTurnHud(this.buttonContainer);
     this.startTurnTimerTicker();
@@ -445,6 +490,9 @@ export class GameBoardScreen {
         const previousState = this.liveGameState;
         this.liveGameState = state.gameState;
         this.livePlayerId = state.playerId ?? this.livePlayerId;
+        if (state.lastActionRejected) {
+          this.handleRejectedBuildAction(state.lastActionRejected);
+        }
         this.updateTurnHud();
         this.refreshPlayerUi();
         this.maybeHandleWinnerState(previousState, state.gameState);
@@ -536,6 +584,73 @@ export class GameBoardScreen {
     panel.style.width = '128px';
     this.playerPanel = panel;
     parent.appendChild(panel);
+  }
+
+  private mountBuildRejectToast(parent: HTMLElement): void {
+    if (this.buildRejectToastEl) {
+      this.buildRejectToastEl.remove();
+    }
+    const toast = document.createElement('div');
+    toast.className = 'hexahaven-build-reject-toast';
+    toast.style.bottom = `${GAME_BOARD_BOTTOM_BAR_PX + 14}px`;
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+
+    const text = document.createElement('div');
+    text.className = 'hexahaven-build-reject-toast-text';
+    toast.appendChild(text);
+
+    this.buildRejectToastEl = toast;
+    this.buildRejectToastTextEl = text;
+    parent.appendChild(toast);
+  }
+
+  private clearBuildRejectToastTimers(): void {
+    if (this.buildRejectToastHideTimer !== null) {
+      clearTimeout(this.buildRejectToastHideTimer);
+      this.buildRejectToastHideTimer = null;
+    }
+    if (this.buildRejectToastCleanupTimer !== null) {
+      clearTimeout(this.buildRejectToastCleanupTimer);
+      this.buildRejectToastCleanupTimer = null;
+    }
+  }
+
+  private showBuildRejectToast(message: string): void {
+    if (!this.buildRejectToastEl || !this.buildRejectToastTextEl) {
+      return;
+    }
+    this.clearBuildRejectToastTimers();
+    this.buildRejectToastTextEl.textContent = message;
+    this.buildRejectToastEl.classList.remove('is-hiding');
+    this.buildRejectToastEl.classList.remove('is-visible');
+    void this.buildRejectToastEl.offsetWidth;
+    this.buildRejectToastEl.classList.add('is-visible');
+    this.buildRejectToastHideTimer = window.setTimeout(() => {
+      if (!this.buildRejectToastEl) {
+        return;
+      }
+      this.buildRejectToastEl.classList.remove('is-visible');
+      this.buildRejectToastEl.classList.add('is-hiding');
+      this.buildRejectToastCleanupTimer = window.setTimeout(() => {
+        this.buildRejectToastEl?.classList.remove('is-hiding');
+        this.buildRejectToastCleanupTimer = null;
+      }, 240);
+      this.buildRejectToastHideTimer = null;
+    }, 3000);
+  }
+
+  private handleRejectedBuildAction(rejection: ActionRejectedEvent): void {
+    const rejectionKey = `${rejection.code}|${rejection.message}`;
+    if (this.lastRejectedBuildToastKey === rejectionKey) {
+      return;
+    }
+    const buildAttemptIsRecent = this.awaitingBuildAck || (Date.now() - this.lastBuildAttemptedAtMs) <= 5000;
+    if (!buildAttemptIsRecent) {
+      return;
+    }
+    this.lastRejectedBuildToastKey = rejectionKey;
+    this.showBuildRejectToast(toFriendlyBuildRejectionMessage(rejection));
   }
 
   private ensureResourceFxLayer(parent: HTMLElement): void {
@@ -1703,7 +1818,6 @@ export class GameBoardScreen {
       acc[key] = inventoryCount(player.resources[key]);
       return acc;
     }, {} as Partial<Record<ResourceKey, number>>);
-    this.lastResourceSnapshot = { ...player.resources };
     if (gainedButtons.length > 0) {
       console.log('[ResourcePopDebug] Triggering pop animation for resource buttons', {
         count: gainedButtons.length,
@@ -1971,6 +2085,9 @@ export class GameBoardScreen {
       }
       this.pendingBuild = null;
       this.dismissBuildRecipePopover();
+      this.awaitingBuildAck = true;
+      this.lastBuildAttemptedAtMs = Date.now();
+      this.lastRejectedBuildToastKey = null;
       void buildStructure({
         gameId: roomId,
         kind,
@@ -1979,6 +2096,13 @@ export class GameBoardScreen {
         playBuildPlacementSound(kind);
       }).catch((error) => {
         console.error('Structure build failed:', error);
+        const rejected = clientState.lastActionRejected ?? {
+          code: 'INTERNAL_ERROR' as const,
+          message: error instanceof Error ? error.message : 'Illegal move! You cannot build there.',
+        };
+        this.handleRejectedBuildAction(rejected);
+      }).finally(() => {
+        this.awaitingBuildAck = false;
       });
       return;
     }
@@ -1989,6 +2113,9 @@ export class GameBoardScreen {
 
     this.pendingBuild = null;
     this.dismissBuildRecipePopover();
+    this.awaitingBuildAck = true;
+    this.lastBuildAttemptedAtMs = Date.now();
+    this.lastRejectedBuildToastKey = null;
     void buildStructure({
       gameId: roomId,
       kind,
@@ -1997,6 +2124,13 @@ export class GameBoardScreen {
       playBuildPlacementSound(kind);
     }).catch((error) => {
       console.error('Structure build failed:', error);
+      const rejected = clientState.lastActionRejected ?? {
+        code: 'INTERNAL_ERROR' as const,
+        message: error instanceof Error ? error.message : 'Illegal move! You cannot build there.',
+      };
+      this.handleRejectedBuildAction(rejected);
+    }).finally(() => {
+      this.awaitingBuildAck = false;
     });
   }
 
@@ -2892,6 +3026,15 @@ export class GameBoardScreen {
     this.activeResourceFxTimers.forEach((timerId) => clearTimeout(timerId));
     this.activeResourceFxTimers = [];
     this.pendingResourceBarPops = [];
+    this.clearBuildRejectToastTimers();
+    if (this.buildRejectToastEl) {
+      this.buildRejectToastEl.remove();
+      this.buildRejectToastEl = null;
+    }
+    this.buildRejectToastTextEl = null;
+    this.lastRejectedBuildToastKey = null;
+    this.awaitingBuildAck = false;
+    this.lastBuildAttemptedAtMs = 0;
     if (this.resourceFxLayer) {
       this.resourceFxLayer.remove();
       this.resourceFxLayer = null;
@@ -2975,7 +3118,6 @@ export class GameBoardScreen {
     this.mapScreen = null;
     this.liveGameState = null;
     this.livePlayerId = null;
-    this.lastResourceSnapshot = null;
     this.lastRenderedResourceCounts = null;
     this.pendingBuild = null;
     this.resourceSelection = emptyResourceBundle();

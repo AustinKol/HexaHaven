@@ -158,3 +158,59 @@ body {
   opacity: 0;
   transform: scale(1.02);
 }
+
+@keyframes hexahaven-build-reject-in {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 14px) scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+@keyframes hexahaven-build-reject-out {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, 12px) scale(0.97);
+  }
+}
+
+.hexahaven-build-reject-toast {
+  position: absolute;
+  left: 50%;
+  z-index: 7;
+  max-width: min(640px, calc(100vw - 28px));
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, 12px) scale(0.97);
+}
+
+.hexahaven-build-reject-toast-text {
+  font-family: "04B_30__", monospace;
+  letter-spacing: 0.03em;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #fee2e2;
+  text-align: center;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(248, 113, 113, 0.8);
+  background: linear-gradient(180deg, rgba(69, 10, 10, 0.94), rgba(30, 41, 59, 0.95));
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.42),
+    0 0 0 1px rgba(127, 29, 29, 0.35) inset;
+}
+
+.hexahaven-build-reject-toast.is-visible {
+  animation: hexahaven-build-reject-in 0.2s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.hexahaven-build-reject-toast.is-hiding {
+  animation: hexahaven-build-reject-out 0.22s ease forwards;
+}
