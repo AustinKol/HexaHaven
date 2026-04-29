@@ -23,6 +23,8 @@ const GAME_BOARD_MAP_LIFT_PX = 20;
 const FIXED_TURN_TIME_SECONDS = 30;
 const TURN_TIMER_WARNING_SECONDS = 15;
 const CLIENT_WIN_VP_FALLBACK = 10;
+const TUTORIAL_MODE_STORAGE_KEY = 'hexahaven.tutorialModeEnabled';
+const YOUR_TURN_TOAST_MS = 3000;
 
 /** Matches map biome feel (see TestMapGenScreen BIOME_PALETTE); tuned for UI legibility. */
 const RESOURCE_BOX_CONFIG: {
@@ -156,6 +158,18 @@ function canAffordCost(inventory: ResourceBundle, cost: ResourceBundle): boolean
   return ClientEnv.devUnlimitedMaterials || playerCanAffordCost(inventory, cost);
 }
 
+function pickMessage(messages: readonly string[], seed: string): string {
+  if (messages.length === 0) {
+    return '';
+  }
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
+  }
+  const index = Math.abs(hash) % messages.length;
+  return messages[index] ?? messages[0];
+}
+
 function emptyResourceBundle(): ResourceBundle {
   return { CRYSTAL: 0, STONE: 0, BLOOM: 0, EMBER: 0, GOLD: 0 };
 }
@@ -167,6 +181,55 @@ function inventoryCount(n: unknown): number {
 }
 
 type BuildKind = 'ROAD' | 'SETTLEMENT' | 'CITY';
+type TutorialTarget = 'ROLL' | 'SETTLEMENT' | 'ROAD' | 'CITY' | 'BANK_TRADE' | 'END_TURN';
+type TutorialPlacement = 'above' | 'below';
+
+interface TutorialPrompt {
+  key: string;
+  target: TutorialTarget;
+  message: string;
+  placement: TutorialPlacement;
+}
+
+const ROLL_TUTORIAL_MESSAGES = [
+  'Roll the dice!',
+  'Start your turn by rolling.',
+  'Roll to collect resources.',
+];
+
+const SETTLEMENT_TUTORIAL_MESSAGES = [
+  'Build a settlement to earn more resources.',
+  'Place a house on a valid corner.',
+  'Settlements must be spaced apart, so choose carefully.',
+];
+
+const ROAD_TUTORIAL_MESSAGES = [
+  'Build roads to expand your territory.',
+  'Roads help you reach new settlement spots.',
+];
+
+const CITY_TUTORIAL_MESSAGES = [
+  'Upgrade a settlement into a city for stronger payouts.',
+  'Cities collect more resources from nearby tiles.',
+];
+
+const BANK_TRADE_TUTORIAL_MESSAGES = [
+  'Missing resources? Trade with the bank.',
+  'You can trade 4 of one resource for 1 you need.',
+  'Use bank trade to fix your resource hand.',
+];
+
+const END_TURN_TUTORIAL_MESSAGES = [
+  'No strong moves? End your turn.',
+  'You can pass the turn when you are done.',
+  'End your turn to keep the game moving.',
+];
+
+const YOUR_TURN_MESSAGES = [
+  "It's your turn! Roll the dice.",
+  'Your turn! Start by rolling.',
+  "You're up! Roll to collect resources.",
+];
 
 /** Costs (paid from inventory when you can afford): Road 1E+1St · Settlement 1E+1Bl+1St · City 3St+2Bl · Dev 2Cr+2Go */
 const BUILD_OPTIONS: { kind: BuildKind; label: string; cost: ResourceBundle; iconSrc?: string }[] = [
@@ -212,6 +275,8 @@ export class GameBoardScreen {
   private exitButton: HTMLButtonElement | null = null;
   private musicToggleButton: HTMLButtonElement | null = null;
   private settingsButton: HTMLButtonElement | null = null;
+  private tutorialToggleButton: HTMLButtonElement | null = null;
+  private tutorialModeEnabled = true;
   private gameSettingsBackdrop: HTMLDivElement | null = null;
   private gameSettingsBoardMusicRange: HTMLInputElement | null = null;
   private gameSettingsBoardMusicValueEl: HTMLElement | null = null;
@@ -228,6 +293,20 @@ export class GameBoardScreen {
   private buildRejectToastTextEl: HTMLDivElement | null = null;
   private buildRejectToastHideTimer: number | null = null;
   private buildRejectToastCleanupTimer: number | null = null;
+  private yourTurnToastEl: HTMLDivElement | null = null;
+  private yourTurnToastTextEl: HTMLDivElement | null = null;
+  private yourTurnToastHideTimer: number | null = null;
+  private yourTurnToastCleanupTimer: number | null = null;
+  private lastYourTurnToastKey: string | null = null;
+  private tutorialOverlayEl: HTMLDivElement | null = null;
+  private tutorialPromptEl: HTMLDivElement | null = null;
+  private tutorialPromptArrowEl: HTMLDivElement | null = null;
+  private tutorialPromptBubbleEl: HTMLDivElement | null = null;
+  private tutorialPromptBubbleTextEl: HTMLDivElement | null = null;
+  private tutorialPromptCleanupTimer: number | null = null;
+  private shownTutorialPromptKey: string | null = null;
+  private shownTutorialPromptTarget: TutorialTarget | null = null;
+  private dismissedTutorialPromptKey: string | null = null;
   private lastRejectedBuildToastKey: string | null = null;
   private lastBuildAttemptedAtMs = 0;
   private awaitingBuildAck = false;
@@ -258,6 +337,7 @@ export class GameBoardScreen {
   private diceCompleteDelayTimer: number | null = null;
   private localDiceRollStartedAt: number | null = null;
   private rollDiceButton: HTMLButtonElement | null = null;
+  private buildButtons: Partial<Record<BuildKind, HTMLButtonElement>> = {};
   private chatPanel: HTMLDivElement | null = null;
   private chatMessagesContainer: HTMLDivElement | null = null;
   private chatInput: HTMLInputElement | null = null;
@@ -286,6 +366,10 @@ export class GameBoardScreen {
   private activeResourceFxTimers: number[] = [];
   private pendingResourceBarPops: ResourceKey[] = [];
   private fallbackLastDiceRoll = '';
+  private readonly onWindowResize = (): void => {
+    this.repositionYourTurnToast();
+    this.repositionTutorialPrompt();
+  };
   private readonly onSettingsChanged = (): void => {
     this.backgroundMusic.volume = scaledBoardMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
     this.syncGameSettingsPanelSliders();
@@ -409,6 +493,7 @@ export class GameBoardScreen {
   }
 
   constructor() {
+    this.tutorialModeEnabled = this.loadTutorialModePreference();
     this.backgroundMusic.loop = true;
     this.onSettingsChanged();
   }
@@ -418,9 +503,58 @@ export class GameBoardScreen {
     this.updateTurnHud();
   }
 
+  private loadTutorialModePreference(): boolean {
+    try {
+      const raw = window.localStorage.getItem(TUTORIAL_MODE_STORAGE_KEY);
+      if (raw === null) {
+        return true;
+      }
+      return raw !== 'off';
+    } catch {
+      return true;
+    }
+  }
+
+  private persistTutorialModePreference(): void {
+    try {
+      window.localStorage.setItem(TUTORIAL_MODE_STORAGE_KEY, this.tutorialModeEnabled ? 'on' : 'off');
+    } catch {
+      // Storage access can fail in some embedded browser contexts.
+    }
+  }
+
+  private syncTutorialToggleButtonUi(): void {
+    if (!this.tutorialToggleButton) {
+      return;
+    }
+    this.tutorialToggleButton.classList.toggle('is-enabled', this.tutorialModeEnabled);
+    this.tutorialToggleButton.textContent = this.tutorialModeEnabled ? 'Guide On' : 'Guide Off';
+    this.tutorialToggleButton.setAttribute(
+      'aria-label',
+      this.tutorialModeEnabled ? 'Turn tutorial guidance off' : 'Turn tutorial guidance on',
+    );
+    this.tutorialToggleButton.title = this.tutorialModeEnabled ? 'Tutorial guidance is on' : 'Tutorial guidance is off';
+  }
+
+  private setTutorialModeEnabled(enabled: boolean): void {
+    if (this.tutorialModeEnabled === enabled) {
+      return;
+    }
+    this.tutorialModeEnabled = enabled;
+    this.persistTutorialModePreference();
+    this.syncTutorialToggleButtonUi();
+    if (!enabled) {
+      this.hideTutorialPrompt();
+      return;
+    }
+    this.dismissedTutorialPromptKey = null;
+    this.syncTutorialPrompt();
+  }
+
   render(parentElement: HTMLElement, onComplete?: () => void, navigate?: (screenId: ScreenId) => void): void {
     this.navigateToScreen = navigate ?? null;
     window.addEventListener(SETTINGS_CHANGED_EVENT, this.onSettingsChanged);
+    window.addEventListener('resize', this.onWindowResize);
     this.playBackgroundMusic();
     const session = getLobbySession();
     const roomId = session?.roomId ?? null;
@@ -475,6 +609,8 @@ export class GameBoardScreen {
     }
     this.ensureResourceFxLayer(this.buttonContainer);
     this.mountBuildRejectToast(this.buttonContainer);
+    this.mountYourTurnToast(this.buttonContainer);
+    this.mountTutorialOverlay(this.buttonContainer);
     this.mountPlayerPanel(this.buttonContainer);
     this.mountTurnHud(this.buttonContainer);
     this.startTurnTimerTicker();
@@ -497,11 +633,15 @@ export class GameBoardScreen {
         this.refreshPlayerUi();
         this.maybeHandleWinnerState(previousState, state.gameState);
         this.maybeAnimateResourceDistribution(previousState, state.gameState);
+        this.maybeShowYourTurnToast(previousState, state.gameState);
+        this.syncTutorialPrompt();
       });
     } else {
       this.liveGameState = clientState.gameState;
       this.refreshPlayerUi();
       this.maybeHandleWinnerState(null, this.liveGameState);
+      this.maybeShowYourTurnToast(null, this.liveGameState);
+      this.syncTutorialPrompt();
     }
 
     if (!this.navigateToScreen) {
@@ -517,6 +657,20 @@ export class GameBoardScreen {
     topRight.style.flexDirection = 'row';
     topRight.style.alignItems = 'center';
     topRight.style.gap = '8px';
+
+    this.tutorialToggleButton = document.createElement('button');
+    this.tutorialToggleButton.type = 'button';
+    this.tutorialToggleButton.className = 'hexahaven-tutorial-toggle font-hexahaven-ui';
+    this.tutorialToggleButton.style.height = '40px';
+    this.tutorialToggleButton.style.padding = '0 10px';
+    this.tutorialToggleButton.style.fontSize = '11px';
+    this.tutorialToggleButton.style.fontWeight = '600';
+    this.tutorialToggleButton.style.borderRadius = '8px';
+    this.tutorialToggleButton.style.cursor = 'pointer';
+    this.tutorialToggleButton.addEventListener('click', () => {
+      this.setTutorialModeEnabled(!this.tutorialModeEnabled);
+    });
+    this.syncTutorialToggleButtonUi();
 
     this.settingsButton = document.createElement('button');
     this.settingsButton.type = 'button';
@@ -552,6 +706,7 @@ export class GameBoardScreen {
     this.exitButton.addEventListener('click', () => {
       this.returnToMainMenu();
     });
+    topRight.appendChild(this.tutorialToggleButton);
     topRight.appendChild(this.settingsButton);
     this.musicToggleButton = document.createElement('button');
     this.musicToggleButton.type = 'button';
@@ -572,6 +727,7 @@ export class GameBoardScreen {
     topRight.appendChild(this.exitButton);
     this.topRightContainer = topRight;
     this.buttonContainer.appendChild(topRight);
+    this.syncTutorialPrompt();
   }
 
   private mountPlayerPanel(parent: HTMLElement): void {
@@ -638,6 +794,356 @@ export class GameBoardScreen {
       }, 240);
       this.buildRejectToastHideTimer = null;
     }, 3000);
+  }
+
+  private mountYourTurnToast(parent: HTMLElement): void {
+    if (this.yourTurnToastEl) {
+      this.yourTurnToastEl.remove();
+    }
+    const toast = document.createElement('div');
+    toast.className = 'hexahaven-your-turn-toast';
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+    const text = document.createElement('div');
+    text.className = 'hexahaven-your-turn-toast-text';
+    toast.appendChild(text);
+    this.yourTurnToastEl = toast;
+    this.yourTurnToastTextEl = text;
+    parent.appendChild(toast);
+    this.repositionYourTurnToast();
+  }
+
+  private clearYourTurnToastTimers(): void {
+    if (this.yourTurnToastHideTimer !== null) {
+      clearTimeout(this.yourTurnToastHideTimer);
+      this.yourTurnToastHideTimer = null;
+    }
+    if (this.yourTurnToastCleanupTimer !== null) {
+      clearTimeout(this.yourTurnToastCleanupTimer);
+      this.yourTurnToastCleanupTimer = null;
+    }
+  }
+
+  private repositionYourTurnToast(): void {
+    if (!this.yourTurnToastEl) {
+      return;
+    }
+    const dicePanelHeight = this.diceHudPanel?.offsetHeight ?? 84;
+    const bottomOffset = GAME_BOARD_BOTTOM_BAR_PX + Math.max(76, dicePanelHeight + 16);
+    this.yourTurnToastEl.style.left = '16px';
+    this.yourTurnToastEl.style.bottom = `${bottomOffset}px`;
+  }
+
+  private showYourTurnToast(message: string): void {
+    if (!this.yourTurnToastEl || !this.yourTurnToastTextEl) {
+      return;
+    }
+    this.clearYourTurnToastTimers();
+    this.repositionYourTurnToast();
+    this.yourTurnToastTextEl.textContent = message;
+    this.yourTurnToastEl.classList.remove('is-hiding');
+    this.yourTurnToastEl.classList.remove('is-visible');
+    void this.yourTurnToastEl.offsetWidth;
+    this.yourTurnToastEl.classList.add('is-visible');
+    this.yourTurnToastHideTimer = window.setTimeout(() => {
+      if (!this.yourTurnToastEl) {
+        return;
+      }
+      this.yourTurnToastEl.classList.remove('is-visible');
+      this.yourTurnToastEl.classList.add('is-hiding');
+      this.yourTurnToastCleanupTimer = window.setTimeout(() => {
+        this.yourTurnToastEl?.classList.remove('is-hiding');
+        this.yourTurnToastCleanupTimer = null;
+      }, 240);
+      this.yourTurnToastHideTimer = null;
+    }, YOUR_TURN_TOAST_MS);
+  }
+
+  private maybeShowYourTurnToast(previousState: GameState | null, nextState: GameState | null): void {
+    const localPlayerId = this.livePlayerId;
+    if (!nextState || !localPlayerId || localPlayerId === 'spectator') {
+      return;
+    }
+    const activePlayerId = nextState.turn.currentPlayerId;
+    if (!activePlayerId || activePlayerId !== localPlayerId) {
+      return;
+    }
+    const toastKey = `${nextState.gameId}|${nextState.turn.currentTurn}|${activePlayerId}`;
+    if (toastKey === this.lastYourTurnToastKey) {
+      return;
+    }
+    const activeChangedToLocal = previousState?.turn.currentPlayerId !== localPlayerId;
+    const turnChanged = previousState?.turn.currentTurn !== nextState.turn.currentTurn;
+    const firstLocalState = previousState === null;
+    if (!activeChangedToLocal && !turnChanged && !firstLocalState) {
+      return;
+    }
+    this.lastYourTurnToastKey = toastKey;
+    const messageSeed = `${toastKey}|your-turn`;
+    this.showYourTurnToast(pickMessage(YOUR_TURN_MESSAGES, messageSeed));
+  }
+
+  private mountTutorialOverlay(parent: HTMLElement): void {
+    if (this.tutorialOverlayEl) {
+      this.tutorialOverlayEl.remove();
+    }
+    const overlay = document.createElement('div');
+    overlay.className = 'hexahaven-tutorial-overlay';
+
+    const prompt = document.createElement('div');
+    prompt.className = 'hexahaven-tutorial-tip';
+
+    const arrow = document.createElement('div');
+    arrow.className = 'hexahaven-tutorial-arrow';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'hexahaven-tutorial-bubble font-hexahaven-ui';
+
+    const text = document.createElement('div');
+    text.className = 'hexahaven-tutorial-bubble-text';
+
+    bubble.appendChild(text);
+    prompt.appendChild(arrow);
+    prompt.appendChild(bubble);
+    overlay.appendChild(prompt);
+    parent.appendChild(overlay);
+
+    this.tutorialOverlayEl = overlay;
+    this.tutorialPromptEl = prompt;
+    this.tutorialPromptArrowEl = arrow;
+    this.tutorialPromptBubbleEl = bubble;
+    this.tutorialPromptBubbleTextEl = text;
+    this.hideTutorialPrompt();
+  }
+
+  private resolveTutorialAnchor(target: TutorialTarget): HTMLElement | null {
+    switch (target) {
+      case 'ROLL':
+        return this.rollDiceButton;
+      case 'SETTLEMENT':
+        return this.buildButtons.SETTLEMENT ?? null;
+      case 'ROAD':
+        return this.buildButtons.ROAD ?? null;
+      case 'CITY':
+        return this.buildButtons.CITY ?? null;
+      case 'BANK_TRADE':
+        return this.bankTradeButton;
+      case 'END_TURN':
+        return this.endTurnButton;
+      default:
+        return null;
+    }
+  }
+
+  private getTutorialPlacementForTarget(target: TutorialTarget, anchor: HTMLElement): TutorialPlacement {
+    const rect = anchor.getBoundingClientRect();
+    if (target === 'BANK_TRADE' || target === 'END_TURN') {
+      return 'below';
+    }
+    if (rect.top < 120) {
+      return 'below';
+    }
+    return 'above';
+  }
+
+  private hideTutorialPrompt(): void {
+    if (!this.tutorialPromptEl) {
+      return;
+    }
+    this.shownTutorialPromptKey = null;
+    this.shownTutorialPromptTarget = null;
+    const isVisible = this.tutorialPromptEl.classList.contains('is-visible');
+    const isHiding = this.tutorialPromptEl.classList.contains('is-hiding');
+    if (!isVisible && !isHiding) {
+      return;
+    }
+    if (this.tutorialPromptCleanupTimer !== null) {
+      clearTimeout(this.tutorialPromptCleanupTimer);
+      this.tutorialPromptCleanupTimer = null;
+    }
+    this.tutorialPromptEl.classList.remove('is-visible');
+    this.tutorialPromptEl.classList.add('is-hiding');
+    this.tutorialPromptCleanupTimer = window.setTimeout(() => {
+      this.tutorialPromptEl?.classList.remove('is-hiding');
+      this.tutorialPromptCleanupTimer = null;
+    }, 220);
+  }
+
+  private repositionTutorialPrompt(): void {
+    if (
+      !this.tutorialOverlayEl
+      || !this.tutorialPromptEl
+      || !this.shownTutorialPromptTarget
+      || !this.shownTutorialPromptKey
+    ) {
+      return;
+    }
+    const anchor = this.resolveTutorialAnchor(this.shownTutorialPromptTarget);
+    if (!anchor || !this.tutorialPromptBubbleEl || !this.tutorialPromptArrowEl) {
+      this.hideTutorialPrompt();
+      return;
+    }
+    const overlayRect = this.tutorialOverlayEl.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    const placement = this.getTutorialPlacementForTarget(this.shownTutorialPromptTarget, anchor);
+    this.tutorialPromptEl.dataset.placement = placement;
+
+    const bubbleWidth = this.tutorialPromptBubbleEl.offsetWidth || 260;
+    const bubbleHeight = this.tutorialPromptBubbleEl.offsetHeight || 52;
+    const arrowSize = this.tutorialPromptArrowEl.offsetWidth || 16;
+    const gap = 10;
+
+    let left = anchorRect.left - overlayRect.left + (anchorRect.width / 2) - (bubbleWidth / 2);
+    const maxLeft = overlayRect.width - bubbleWidth - 8;
+    left = Math.max(8, Math.min(left, Math.max(8, maxLeft)));
+
+    let top: number;
+    if (placement === 'above') {
+      top = anchorRect.top - overlayRect.top - bubbleHeight - arrowSize - gap;
+    } else {
+      top = anchorRect.bottom - overlayRect.top + arrowSize + gap;
+    }
+    const maxTop = overlayRect.height - bubbleHeight - arrowSize - 8;
+    top = Math.max(8, Math.min(top, Math.max(8, maxTop)));
+
+    this.tutorialPromptEl.style.left = `${left}px`;
+    this.tutorialPromptEl.style.top = `${top}px`;
+  }
+
+  private showTutorialPrompt(prompt: TutorialPrompt): void {
+    if (!this.tutorialPromptEl || !this.tutorialPromptBubbleTextEl) {
+      return;
+    }
+    const anchor = this.resolveTutorialAnchor(prompt.target);
+    if (!anchor) {
+      this.hideTutorialPrompt();
+      return;
+    }
+    if (this.tutorialPromptCleanupTimer !== null) {
+      clearTimeout(this.tutorialPromptCleanupTimer);
+      this.tutorialPromptCleanupTimer = null;
+    }
+    this.shownTutorialPromptKey = prompt.key;
+    this.shownTutorialPromptTarget = prompt.target;
+    this.tutorialPromptEl.dataset.placement = prompt.placement;
+    this.tutorialPromptBubbleTextEl.textContent = prompt.message;
+    this.tutorialPromptEl.classList.remove('is-hiding');
+    this.tutorialPromptEl.classList.remove('is-visible');
+    void this.tutorialPromptEl.offsetWidth;
+    this.tutorialPromptEl.classList.add('is-visible');
+    this.repositionTutorialPrompt();
+  }
+
+  private dismissTutorialPromptFromInteraction(target: TutorialTarget): void {
+    if (!this.shownTutorialPromptKey || this.shownTutorialPromptTarget !== target) {
+      return;
+    }
+    this.dismissedTutorialPromptKey = this.shownTutorialPromptKey;
+    this.hideTutorialPrompt();
+  }
+
+  private canUseAnyBankTrade(resources: ResourceBundle): boolean {
+    return RESOURCE_KEYS.some((key) => inventoryCount(resources[key]) >= 4);
+  }
+
+  private resolveTutorialPrompt(gameState: GameState | null, playerId: string | null): TutorialPrompt | null {
+    if (!gameState || !playerId || playerId === 'spectator') {
+      return null;
+    }
+    const activePlayerId = gameState.turn.currentPlayerId;
+    const phase = gameState.turn.phase;
+    if (!activePlayerId || activePlayerId !== playerId) {
+      return null;
+    }
+
+    const player = gameState.playersById[playerId];
+    if (!player) {
+      return null;
+    }
+
+    const turnSeed = `${gameState.gameId}|${gameState.turn.currentTurn}|${phase ?? 'NONE'}|${playerId}`;
+    const isRollPhase = phase === 'ROLL' && gameState.turn.lastDiceRoll === null;
+    if (isRollPhase) {
+      return {
+        key: `${turnSeed}|ROLL`,
+        target: 'ROLL',
+        message: pickMessage(ROLL_TUTORIAL_MESSAGES, `${turnSeed}|ROLL`),
+        placement: 'above',
+      };
+    }
+    if (phase !== 'ACTION') {
+      return null;
+    }
+
+    const canSettlement = canAffordCost(player.resources, BUILD_COSTS.SETTLEMENT);
+    if (canSettlement) {
+      return {
+        key: `${turnSeed}|SETTLEMENT`,
+        target: 'SETTLEMENT',
+        message: pickMessage(SETTLEMENT_TUTORIAL_MESSAGES, `${turnSeed}|SETTLEMENT`),
+        placement: 'above',
+      };
+    }
+    const canRoad = canAffordCost(player.resources, BUILD_COSTS.ROAD);
+    if (canRoad) {
+      return {
+        key: `${turnSeed}|ROAD`,
+        target: 'ROAD',
+        message: pickMessage(ROAD_TUTORIAL_MESSAGES, `${turnSeed}|ROAD`),
+        placement: 'above',
+      };
+    }
+    const canCity = canAffordCost(player.resources, BUILD_COSTS.CITY);
+    if (canCity) {
+      return {
+        key: `${turnSeed}|CITY`,
+        target: 'CITY',
+        message: pickMessage(CITY_TUTORIAL_MESSAGES, `${turnSeed}|CITY`),
+        placement: 'above',
+      };
+    }
+    if (this.canUseAnyBankTrade(player.resources)) {
+      return {
+        key: `${turnSeed}|BANK_TRADE`,
+        target: 'BANK_TRADE',
+        message: pickMessage(BANK_TRADE_TUTORIAL_MESSAGES, `${turnSeed}|BANK_TRADE`),
+        placement: 'below',
+      };
+    }
+    return {
+      key: `${turnSeed}|END_TURN`,
+      target: 'END_TURN',
+      message: pickMessage(END_TURN_TUTORIAL_MESSAGES, `${turnSeed}|END_TURN`),
+      placement: 'below',
+    };
+  }
+
+  private syncTutorialPrompt(): void {
+    if (!this.tutorialModeEnabled) {
+      this.hideTutorialPrompt();
+      return;
+    }
+    const prompt = this.resolveTutorialPrompt(this.liveGameState, this.livePlayerId);
+    const nextKey = prompt?.key ?? null;
+    if (nextKey === null) {
+      this.dismissedTutorialPromptKey = null;
+      this.hideTutorialPrompt();
+      return;
+    }
+    if (this.dismissedTutorialPromptKey && this.dismissedTutorialPromptKey !== nextKey) {
+      this.dismissedTutorialPromptKey = null;
+    }
+    if (this.dismissedTutorialPromptKey === nextKey) {
+      this.hideTutorialPrompt();
+      return;
+    }
+    if (this.shownTutorialPromptKey === nextKey && this.shownTutorialPromptTarget === prompt?.target) {
+      this.repositionTutorialPrompt();
+      return;
+    }
+    if (prompt) {
+      this.showTutorialPrompt(prompt);
+    }
   }
 
   private handleRejectedBuildAction(rejection: ActionRejectedEvent): void {
@@ -756,6 +1262,7 @@ export class GameBoardScreen {
 
     const rollDiceButton = document.createElement('button');
     rollDiceButton.type = 'button';
+    rollDiceButton.dataset.tutorialAnchor = 'roll';
     rollDiceButton.className =
       'font-hexahaven-ui h-9 rounded-md border border-cyan-400 bg-cyan-900 px-3 text-xs font-semibold text-white';
     rollDiceButton.textContent = 'Roll Dice';
@@ -771,6 +1278,7 @@ export class GameBoardScreen {
 
     const endTurnButton = document.createElement('button');
     endTurnButton.type = 'button';
+    endTurnButton.dataset.tutorialAnchor = 'end-turn';
     endTurnButton.className =
       'font-hexahaven-ui rounded-md border border-emerald-400/60 bg-emerald-900/60 px-2 py-1.5 text-[11px] font-semibold';
     endTurnButton.textContent = 'End Turn';
@@ -866,6 +1374,7 @@ export class GameBoardScreen {
 
     const bankTradeButton = document.createElement('button');
     bankTradeButton.type = 'button';
+    bankTradeButton.dataset.tutorialAnchor = 'bank-trade';
     bankTradeButton.className =
       'font-hexahaven-ui rounded-md border border-amber-400/60 bg-amber-900/60 px-2 py-2 text-xs font-semibold';
     bankTradeButton.addEventListener('click', () => this.handleBankTradeClick());
@@ -896,6 +1405,8 @@ export class GameBoardScreen {
     this.refreshBankTradeUi();
     this.updateTurnHud();
     this.updateTurnTimerUi();
+    this.repositionYourTurnToast();
+    this.repositionTutorialPrompt();
   }
 
   private mountChatPanel(parent: HTMLElement): void {
@@ -996,6 +1507,7 @@ export class GameBoardScreen {
     this.isGameOver = true;
     this.pendingBuild = null;
     this.dismissBuildRecipePopover();
+    this.hideTutorialPrompt();
     this.stopTurnTimerTicker();
     this.cancelLocalDiceRollAnimation();
     this.stopBackgroundMusic();
@@ -1983,6 +2495,7 @@ export class GameBoardScreen {
     }
     this.dismissBuildRecipePopover();
     this.resourceBarRight.innerHTML = '';
+    this.buildButtons = {};
 
     const gameState = this.liveGameState ?? clientState.gameState;
     const viewerId = this.livePlayerId;
@@ -2006,6 +2519,7 @@ export class GameBoardScreen {
 
       const btn = document.createElement('button');
       btn.type = 'button';
+      btn.dataset.tutorialAnchor = `build-${kind.toLowerCase()}`;
       btn.className =
         'font-hexahaven-ui flex min-w-[56px] flex-col items-center justify-center self-stretch rounded-md border px-2 py-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/90';
       if (ready) {
@@ -2033,6 +2547,13 @@ export class GameBoardScreen {
         btn.appendChild(img);
       }
       btn.addEventListener('click', () => {
+        if (kind === 'SETTLEMENT') {
+          this.dismissTutorialPromptFromInteraction('SETTLEMENT');
+        } else if (kind === 'ROAD') {
+          this.dismissTutorialPromptFromInteraction('ROAD');
+        } else if (kind === 'CITY') {
+          this.dismissTutorialPromptFromInteraction('CITY');
+        }
         const clickedSamePopoverButton = this.buildRecipePopoverEl && this.buildRecipePopoverAnchor === btn;
         if (clickedSamePopoverButton) {
           this.dismissBuildRecipePopover();
@@ -2047,8 +2568,10 @@ export class GameBoardScreen {
         }
         this.showBuildRecipePopover(btn, label, cost, player.resources);
       });
+      this.buildButtons[kind] = btn;
       this.resourceBarRight?.appendChild(btn);
     });
+    this.repositionTutorialPrompt();
   }
 
   private handleMapPlaceClick(hit: MapPointerHit): void {
@@ -2227,6 +2750,8 @@ export class GameBoardScreen {
       this.bankTradeButton.style.cursor = this.bankTradeButton.disabled ? 'not-allowed' : 'pointer';
     }
     this.updateTurnTimerUi();
+    this.repositionYourTurnToast();
+    this.repositionTutorialPrompt();
   }
 
   private asDiceRoll(raw: unknown): DiceRoll | null {
@@ -2328,6 +2853,7 @@ export class GameBoardScreen {
     if (this.isGameOver) {
       return;
     }
+    this.dismissTutorialPromptFromInteraction('ROLL');
     if (this.turnHudBindings?.onRollDice) {
       this.startLocalDiceRollAnimation();
       this.turnHudBindings.onRollDice();
@@ -2387,6 +2913,7 @@ export class GameBoardScreen {
     if (this.isGameOver) {
       return;
     }
+    this.dismissTutorialPromptFromInteraction('BANK_TRADE');
     const roomId = getLobbySession()?.roomId ?? null;
     if (!roomId) {
       return;
@@ -2426,6 +2953,7 @@ export class GameBoardScreen {
     if (this.isGameOver) {
       return;
     }
+    this.dismissTutorialPromptFromInteraction('END_TURN');
     if (this.turnHudBindings?.onEndTurn) {
       this.turnHudBindings.onEndTurn();
       this.updateTurnHud();
@@ -3027,11 +3555,33 @@ export class GameBoardScreen {
     this.activeResourceFxTimers = [];
     this.pendingResourceBarPops = [];
     this.clearBuildRejectToastTimers();
+    this.clearYourTurnToastTimers();
+    if (this.tutorialPromptCleanupTimer !== null) {
+      clearTimeout(this.tutorialPromptCleanupTimer);
+      this.tutorialPromptCleanupTimer = null;
+    }
     if (this.buildRejectToastEl) {
       this.buildRejectToastEl.remove();
       this.buildRejectToastEl = null;
     }
     this.buildRejectToastTextEl = null;
+    if (this.yourTurnToastEl) {
+      this.yourTurnToastEl.remove();
+      this.yourTurnToastEl = null;
+    }
+    this.yourTurnToastTextEl = null;
+    this.lastYourTurnToastKey = null;
+    if (this.tutorialOverlayEl) {
+      this.tutorialOverlayEl.remove();
+      this.tutorialOverlayEl = null;
+    }
+    this.tutorialPromptEl = null;
+    this.tutorialPromptArrowEl = null;
+    this.tutorialPromptBubbleEl = null;
+    this.tutorialPromptBubbleTextEl = null;
+    this.shownTutorialPromptKey = null;
+    this.shownTutorialPromptTarget = null;
+    this.dismissedTutorialPromptKey = null;
     this.lastRejectedBuildToastKey = null;
     this.awaitingBuildAck = false;
     this.lastBuildAttemptedAtMs = 0;
@@ -3056,6 +3606,7 @@ export class GameBoardScreen {
     this.gameSettingsGameSfxRange = null;
     this.gameSettingsGameSfxValueEl = null;
     window.removeEventListener(SETTINGS_CHANGED_EVENT, this.onSettingsChanged);
+    window.removeEventListener('resize', this.onWindowResize);
     this.stopBackgroundMusic();
     if (this.unsubscribe) {
       this.unsubscribe();
@@ -3067,6 +3618,7 @@ export class GameBoardScreen {
     }
     this.exitButton = null;
     this.settingsButton = null;
+    this.tutorialToggleButton = null;
     if (this.musicToggleButton) {
       this.musicToggleButton.remove();
       this.musicToggleButton = null;
@@ -3098,6 +3650,7 @@ export class GameBoardScreen {
     this.rollDiceButton = null;
     this.endTurnButton = null;
     this.bankTradeButton = null;
+    this.buildButtons = {};
     this.bankGiveButtons = {};
     this.bankReceiveButtons = {};
     this.bankGiveSelection = 'EMBER';

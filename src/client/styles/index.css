@@ -214,3 +214,189 @@ body {
 .hexahaven-build-reject-toast.is-hiding {
   animation: hexahaven-build-reject-out 0.22s ease forwards;
 }
+
+.hexahaven-tutorial-toggle {
+  color: #ffffff;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, transform 0.16s ease;
+}
+
+.hexahaven-tutorial-toggle:hover {
+  background: rgba(30, 41, 59, 0.9);
+}
+
+.hexahaven-tutorial-toggle:active {
+  transform: scale(0.98);
+}
+
+.hexahaven-tutorial-toggle.is-enabled {
+  border-color: rgba(34, 211, 238, 0.95);
+  background: linear-gradient(180deg, rgba(8, 47, 73, 0.92), rgba(30, 41, 59, 0.92));
+  box-shadow:
+    0 0 0 1px rgba(34, 211, 238, 0.35) inset,
+    0 6px 14px rgba(8, 47, 73, 0.42);
+}
+
+@keyframes hexahaven-your-turn-in {
+  0% {
+    opacity: 0;
+    transform: translate(-16px, 8px) scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+}
+
+@keyframes hexahaven-your-turn-out {
+  0% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-12px, 6px) scale(0.98);
+  }
+}
+
+.hexahaven-your-turn-toast {
+  position: absolute;
+  z-index: 7;
+  max-width: min(340px, calc(100vw - 36px));
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-12px, 6px) scale(0.98);
+}
+
+.hexahaven-your-turn-toast-text {
+  font-family: "04B_30__", monospace;
+  letter-spacing: 0.03em;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #f0f9ff;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(56, 189, 248, 0.82);
+  background: linear-gradient(180deg, rgba(8, 47, 73, 0.95), rgba(30, 41, 59, 0.94));
+  box-shadow:
+    0 10px 22px rgba(2, 6, 23, 0.45),
+    0 0 0 1px rgba(12, 74, 110, 0.4) inset;
+}
+
+.hexahaven-your-turn-toast.is-visible {
+  animation: hexahaven-your-turn-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.hexahaven-your-turn-toast.is-hiding {
+  animation: hexahaven-your-turn-out 0.2s ease forwards;
+}
+
+@keyframes hexahaven-tutorial-pop-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.95) translateY(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes hexahaven-tutorial-pop-out {
+  0% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.98) translateY(6px);
+  }
+}
+
+@keyframes hexahaven-tutorial-bubble-idle {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.02);
+  }
+}
+
+@keyframes hexahaven-tutorial-arrow-bob {
+  0%,
+  100% {
+    transform: rotate(45deg) translateY(0);
+  }
+  50% {
+    transform: rotate(45deg) translateY(2px);
+  }
+}
+
+.hexahaven-tutorial-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.hexahaven-tutorial-tip {
+  position: absolute;
+  width: 260px;
+  opacity: 0;
+  transform-origin: center;
+  pointer-events: none;
+}
+
+.hexahaven-tutorial-tip.is-visible {
+  animation: hexahaven-tutorial-pop-in 0.2s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.hexahaven-tutorial-tip.is-hiding {
+  animation: hexahaven-tutorial-pop-out 0.18s ease forwards;
+}
+
+.hexahaven-tutorial-bubble {
+  border: 1px solid rgba(56, 189, 248, 0.82);
+  border-radius: 12px;
+  color: #f8fafc;
+  font-size: 10px;
+  line-height: 1.35;
+  letter-spacing: 0.03em;
+  text-shadow: 0 1px 0 rgba(15, 23, 42, 0.4);
+  background: linear-gradient(180deg, rgba(8, 47, 73, 0.95), rgba(30, 41, 59, 0.96));
+  box-shadow:
+    0 12px 24px rgba(2, 6, 23, 0.42),
+    0 0 0 1px rgba(12, 74, 110, 0.35) inset;
+  padding: 8px 10px;
+  animation: hexahaven-tutorial-bubble-idle 1.8s ease-in-out infinite;
+}
+
+.hexahaven-tutorial-bubble-text {
+  max-width: 100%;
+}
+
+.hexahaven-tutorial-arrow {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-left: 1px solid rgba(56, 189, 248, 0.82);
+  border-top: 1px solid rgba(56, 189, 248, 0.82);
+  background: rgba(15, 23, 42, 0.96);
+  box-shadow: 0 4px 10px rgba(2, 6, 23, 0.34);
+  animation: hexahaven-tutorial-arrow-bob 1.15s ease-in-out infinite;
+}
+
+.hexahaven-tutorial-tip[data-placement="above"] .hexahaven-tutorial-arrow {
+  top: calc(100% - 8px);
+  left: calc(50% - 8px);
+}
+
+.hexahaven-tutorial-tip[data-placement="below"] .hexahaven-tutorial-arrow {
+  top: -8px;
+  left: calc(50% - 8px);
+}
