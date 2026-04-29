@@ -782,6 +782,10 @@ export class GamePersistenceService {
     });
 
     const updatedGameState = await this.loadRequiredGame(gameId);
+    const evaluation = evaluateWinner(updatedGameState);
+    if (evaluation.winnerPlayerId) {
+      return await this.finalizeGame(gameId, evaluation.winnerPlayerId, evaluation.reason);
+    }
     logger.info('Build ' + request.kind + ' by ' + playerId + ' in game ' + gameId);
     return updatedGameState;
   }

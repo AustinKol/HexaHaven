@@ -31,10 +31,12 @@ export function evaluateWinner(gameState: GameState): WinEvaluation {
       continue;
     }
 
+    // Temporary test behavior: VP threshold always wins regardless of room config.
+    if (player.stats.publicVP >= DEFAULT_VP_TO_WIN) {
+      return { winnerPlayerId: playerId, reason: 'FIRST_TO_X_POINTS' };
+    }
+
     if (winRule === 'FIRST_TO_X_POINTS') {
-      if (player.stats.publicVP >= DEFAULT_VP_TO_WIN) {
-        return { winnerPlayerId: playerId, reason: 'FIRST_TO_X_POINTS' };
-      }
       continue;
     }
 

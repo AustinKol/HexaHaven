@@ -1,4 +1,4 @@
-import { playBuildPlacementSound, playDiceRollSound } from '../audio/buildSounds';
+import { playBuildPlacementSound, playDiceRollSound, playVictoryFanfareSound } from '../audio/buildSounds';
 import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledBoardMusicVolume } from '../audio/musicVolume';
 import { ClientEnv } from '../config/env';
 import { BUILD_COSTS } from '../../shared/buildRules';
@@ -21,6 +21,7 @@ const GAME_BOARD_BOTTOM_BAR_PX = 84;
 const GAME_BOARD_MAP_LIFT_PX = 20;
 const FIXED_TURN_TIME_SECONDS = 30;
 const TURN_TIMER_WARNING_SECONDS = 15;
+const CLIENT_WIN_VP_FALLBACK = 10;
 
 /** Matches map biome feel (see TestMapGenScreen BIOME_PALETTE); tuned for UI legibility. */
 const RESOURCE_BOX_CONFIG: {
@@ -167,6 +168,7 @@ export interface GameBoardTurnHudBindings {
 
 export class GameBoardScreen {
   readonly id = ScreenId.GameBoard;
+  private navigateToScreen: ((screenId: ScreenId) => void) | null = null;
   private mapScreen: TestMapGenScreen | null = null;
   private readonly backgroundMusic = new Audio('/audio/game-board-theme.mp3');
   private exitButton: HTMLButtonElement | null = null;
@@ -180,6 +182,10 @@ export class GameBoardScreen {
   private gameSettingsKeydown: ((e: KeyboardEvent) => void) | null = null;
   private gameRulesBackdrop: HTMLDivElement | null = null;
   private gameRulesKeydown: ((e: KeyboardEvent) => void) | null = null;
+  private winnerBackdrop: HTMLDivElement | null = null;
+  private winnerKeydown: ((e: KeyboardEvent) => void) | null = null;
+  private lastAnnouncedWinnerPlayerId: string | null = null;
+  private isGameOver = false;
   private topRightContainer: HTMLElement | null = null;
   private playerPanel: HTMLDivElement | null = null;
   private resourceBar: HTMLDivElement | null = null;
@@ -369,6 +375,7 @@ export class GameBoardScreen {
   }
 
   render(parentElement: HTMLElement, onComplete?: () => void, navigate?: (screenId: ScreenId) => void): void {
+    this.navigateToScreen = navigate ?? null;
     window.addEventListener(SETTINGS_CHANGED_EVENT, this.onSettingsChanged);
     this.playBackgroundMusic();
     const session = getLobbySession();
@@ -440,17 +447,18 @@ export class GameBoardScreen {
         this.livePlayerId = state.playerId ?? this.livePlayerId;
         this.updateTurnHud();
         this.refreshPlayerUi();
+        this.maybeHandleWinnerState(previousState, state.gameState);
         this.maybeAnimateResourceDistribution(previousState, state.gameState);
       });
     } else {
       this.liveGameState = clientState.gameState;
       this.refreshPlayerUi();
+      this.maybeHandleWinnerState(null, this.liveGameState);
     }
 
-    if (!navigate) {
+    if (!this.navigateToScreen) {
       return;
     }
-    const navigateTo = navigate;
 
     const topRight = document.createElement('div');
     topRight.style.position = 'absolute';
@@ -494,10 +502,7 @@ export class GameBoardScreen {
     this.exitButton.style.borderRadius = '8px';
     this.exitButton.style.cursor = 'pointer';
     this.exitButton.addEventListener('click', () => {
-      disconnectSocket();
-      clearLobbySession();
-      resetClientState();
-      navigateTo(ScreenId.MainMenu);
+      this.returnToMainMenu();
     });
     topRight.appendChild(this.settingsButton);
     this.musicToggleButton = document.createElement('button');
@@ -842,6 +847,307 @@ export class GameBoardScreen {
     this.renderBuildingBarFromGameState();
     this.renderChatMessages();
     this.updateMapDisplay();
+  }
+
+  private maybeHandleWinnerState(previousState: GameState | null, nextState: GameState | null): void {
+    const inferredWinnerId = this.resolveFallbackWinnerId(nextState);
+    const nextWinnerId = nextState?.winnerPlayerId ?? inferredWinnerId;
+    if (!nextWinnerId) {
+      if (nextState?.roomStatus !== 'finished') {
+        this.lastAnnouncedWinnerPlayerId = null;
+      }
+      this.closeWinnerOverlay();
+      return;
+    }
+    const previousWinnerId = previousState?.winnerPlayerId ?? null;
+    const winnerChanged = previousWinnerId !== nextWinnerId || this.lastAnnouncedWinnerPlayerId !== nextWinnerId;
+    if (!winnerChanged) {
+      return;
+    }
+    if (!nextState) {
+      return;
+    }
+    this.lastAnnouncedWinnerPlayerId = nextWinnerId;
+    this.enterGameOverMode();
+    this.openWinnerOverlay(nextState, nextWinnerId);
+    playVictoryFanfareSound();
+    this.spawnVictoryConfetti(80);
+  }
+
+  private enterGameOverMode(): void {
+    if (this.isGameOver) {
+      return;
+    }
+    this.isGameOver = true;
+    this.pendingBuild = null;
+    this.dismissBuildRecipePopover();
+    this.stopTurnTimerTicker();
+    this.cancelLocalDiceRollAnimation();
+    this.stopBackgroundMusic();
+    if (this.resourceBar) {
+      this.resourceBar.style.pointerEvents = 'none';
+      this.resourceBar.style.filter = 'grayscale(0.55)';
+      this.resourceBar.style.opacity = '0.55';
+    }
+    if (this.turnHudPanel) {
+      this.turnHudPanel.style.pointerEvents = 'none';
+      this.turnHudPanel.style.opacity = '0.5';
+    }
+    if (this.chatPanel) {
+      this.chatPanel.style.pointerEvents = 'none';
+      this.chatPanel.style.opacity = '0.55';
+    }
+    if (this.settingsButton) {
+      this.settingsButton.style.display = 'none';
+    }
+    if (this.musicToggleButton) {
+      this.musicToggleButton.style.display = 'none';
+    }
+    if (this.exitButton) {
+      this.exitButton.style.display = 'none';
+    }
+    this.updateMapDisplay();
+  }
+
+  private resolveFallbackWinnerId(gameState: GameState | null): string | null {
+    if (!gameState) {
+      return null;
+    }
+    const ranked = gameState.playerOrder
+      .map((playerId) => gameState.playersById[playerId])
+      .filter((player): player is NonNullable<typeof player> => Boolean(player))
+      .sort((a, b) => (b.stats.publicVP ?? 0) - (a.stats.publicVP ?? 0));
+    const leader = ranked[0];
+    if (!leader) {
+      return null;
+    }
+    if (gameState.roomStatus === 'finished') {
+      return leader.playerId;
+    }
+    return (leader.stats.publicVP ?? 0) >= CLIENT_WIN_VP_FALLBACK ? leader.playerId : null;
+  }
+
+  private openWinnerOverlay(gameState: GameState, winnerPlayerId: string): void {
+    this.closeWinnerOverlay();
+    const winner = gameState.playersById[winnerPlayerId];
+    if (!winner) {
+      return;
+    }
+    const sortedPlayers = gameState.playerOrder
+      .map((playerId) => gameState.playersById[playerId])
+      .filter((player): player is NonNullable<typeof player> => Boolean(player))
+      .sort((a, b) => {
+        const vpDelta = (b.stats.publicVP ?? 0) - (a.stats.publicVP ?? 0);
+        if (vpDelta !== 0) {
+          return vpDelta;
+        }
+        return a.displayName.localeCompare(b.displayName);
+      });
+
+    const backdrop = document.createElement('div');
+    backdrop.style.position = 'fixed';
+    backdrop.style.inset = '0';
+    backdrop.style.zIndex = '80';
+    backdrop.style.display = 'flex';
+    backdrop.style.alignItems = 'center';
+    backdrop.style.justifyContent = 'center';
+    backdrop.style.background = 'rgba(2, 6, 23, 0.75)';
+    backdrop.style.padding = '16px';
+    backdrop.style.backdropFilter = 'blur(2px)';
+
+    const panel = document.createElement('div');
+    panel.className = 'font-hexahaven-ui';
+    panel.style.width = 'min(560px, 94vw)';
+    panel.style.maxHeight = 'min(82vh, 640px)';
+    panel.style.overflowY = 'auto';
+    panel.style.borderRadius = '16px';
+    panel.style.border = '1px solid rgba(251, 191, 36, 0.65)';
+    panel.style.background = 'linear-gradient(180deg, rgba(15, 23, 42, 0.97), rgba(30, 41, 59, 0.97))';
+    panel.style.boxShadow = '0 20px 60px rgba(0, 0, 0, 0.5), 0 0 24px rgba(251, 191, 36, 0.25)';
+    panel.style.color = '#f8fafc';
+    panel.style.padding = '18px';
+    panel.addEventListener('click', (event) => event.stopPropagation());
+
+    const heading = document.createElement('h2');
+    heading.textContent = 'Victory!';
+    heading.style.margin = '0';
+    heading.style.textAlign = 'center';
+    heading.style.fontSize = '36px';
+    heading.style.letterSpacing = '0.08em';
+    heading.style.color = '#fcd34d';
+
+    const winnerCard = document.createElement('div');
+    winnerCard.style.marginTop = '12px';
+    winnerCard.style.display = 'grid';
+    winnerCard.style.gridTemplateColumns = '84px 1fr';
+    winnerCard.style.gap = '12px';
+    winnerCard.style.alignItems = 'center';
+    winnerCard.style.padding = '12px';
+    winnerCard.style.border = '1px solid rgba(251, 191, 36, 0.45)';
+    winnerCard.style.borderRadius = '12px';
+    winnerCard.style.background = 'rgba(15, 23, 42, 0.62)';
+
+    const winnerAvatar = document.createElement('img');
+    winnerAvatar.src = winner.avatarUrl ?? '/avatar/avatar_1.png';
+    winnerAvatar.alt = `${winner.displayName} avatar`;
+    winnerAvatar.style.width = '80px';
+    winnerAvatar.style.height = '80px';
+    winnerAvatar.style.borderRadius = '10px';
+    winnerAvatar.style.objectFit = 'cover';
+    winnerAvatar.style.border = `2px solid ${winner.color || '#fcd34d'}`;
+
+    const winnerTextWrap = document.createElement('div');
+    const winnerName = document.createElement('div');
+    winnerName.textContent = winner.displayName;
+    winnerName.style.fontSize = '24px';
+    winnerName.style.fontWeight = '700';
+    winnerName.style.color = winner.color || '#f8fafc';
+    const winnerVp = document.createElement('div');
+    winnerVp.textContent = `${winner.stats.publicVP ?? 0} Victory Points`;
+    winnerVp.style.marginTop = '4px';
+    winnerVp.style.fontSize = '14px';
+    winnerVp.style.color = '#e2e8f0';
+    winnerTextWrap.appendChild(winnerName);
+    winnerTextWrap.appendChild(winnerVp);
+
+    winnerCard.appendChild(winnerAvatar);
+    winnerCard.appendChild(winnerTextWrap);
+
+    const leaderboardTitle = document.createElement('div');
+    leaderboardTitle.textContent = 'Leaderboard';
+    leaderboardTitle.style.marginTop = '16px';
+    leaderboardTitle.style.marginBottom = '8px';
+    leaderboardTitle.style.fontSize = '14px';
+    leaderboardTitle.style.textTransform = 'uppercase';
+    leaderboardTitle.style.letterSpacing = '0.06em';
+    leaderboardTitle.style.color = '#fde68a';
+
+    const leaderboard = document.createElement('div');
+    leaderboard.style.display = 'grid';
+    leaderboard.style.gap = '8px';
+    sortedPlayers.forEach((player, index) => {
+      const row = document.createElement('div');
+      row.style.display = 'grid';
+      row.style.gridTemplateColumns = '28px 38px 1fr auto';
+      row.style.alignItems = 'center';
+      row.style.gap = '8px';
+      row.style.padding = '7px 9px';
+      row.style.borderRadius = '8px';
+      row.style.border = '1px solid rgba(148, 163, 184, 0.35)';
+      row.style.background = player.playerId === winnerPlayerId ? 'rgba(251, 191, 36, 0.2)' : 'rgba(15, 23, 42, 0.42)';
+
+      const rank = document.createElement('span');
+      rank.textContent = `#${index + 1}`;
+      rank.style.color = '#cbd5e1';
+      rank.style.fontSize = '13px';
+
+      const avatar = document.createElement('img');
+      avatar.src = player.avatarUrl ?? '/avatar/avatar_1.png';
+      avatar.alt = `${player.displayName} avatar`;
+      avatar.style.width = '34px';
+      avatar.style.height = '34px';
+      avatar.style.objectFit = 'cover';
+      avatar.style.borderRadius = '6px';
+
+      const name = document.createElement('span');
+      name.textContent = player.displayName;
+      name.style.color = player.color || '#f8fafc';
+      name.style.fontSize = '14px';
+      name.style.fontWeight = '600';
+
+      const points = document.createElement('span');
+      points.textContent = `${player.stats.publicVP ?? 0} VP`;
+      points.style.color = '#e2e8f0';
+      points.style.fontSize = '13px';
+
+      row.appendChild(rank);
+      row.appendChild(avatar);
+      row.appendChild(name);
+      row.appendChild(points);
+      leaderboard.appendChild(row);
+    });
+
+    const menuBtn = document.createElement('button');
+    menuBtn.type = 'button';
+    menuBtn.textContent = 'Back to Menu';
+    menuBtn.style.marginTop = '14px';
+    menuBtn.style.padding = '8px 14px';
+    menuBtn.style.borderRadius = '8px';
+    menuBtn.style.border = '1px solid rgba(255,255,255,0.32)';
+    menuBtn.style.background = 'rgba(30, 41, 59, 0.92)';
+    menuBtn.style.color = '#f8fafc';
+    menuBtn.style.cursor = 'pointer';
+    menuBtn.addEventListener('click', () => this.returnToMainMenu());
+
+    panel.appendChild(heading);
+    panel.appendChild(winnerCard);
+    panel.appendChild(leaderboardTitle);
+    panel.appendChild(leaderboard);
+    panel.appendChild(menuBtn);
+    backdrop.appendChild(panel);
+    document.body.appendChild(backdrop);
+    this.winnerBackdrop = backdrop;
+  }
+
+  private closeWinnerOverlay(): void {
+    if (this.winnerBackdrop) {
+      this.winnerBackdrop.remove();
+      this.winnerBackdrop = null;
+    }
+    if (this.winnerKeydown) {
+      document.removeEventListener('keydown', this.winnerKeydown);
+      this.winnerKeydown = null;
+    }
+  }
+
+  private returnToMainMenu(): void {
+    disconnectSocket();
+    clearLobbySession();
+    resetClientState();
+    this.navigateToScreen?.(ScreenId.MainMenu);
+  }
+
+  private spawnVictoryConfetti(pieceCount: number): void {
+    if (!this.buttonContainer) {
+      return;
+    }
+    const layer = document.createElement('div');
+    layer.style.position = 'absolute';
+    layer.style.inset = '0';
+    layer.style.zIndex = '35';
+    layer.style.pointerEvents = 'none';
+    this.buttonContainer.appendChild(layer);
+
+    const colors = ['#f43f5e', '#f59e0b', '#84cc16', '#22d3ee', '#818cf8', '#facc15'];
+    for (let i = 0; i < pieceCount; i += 1) {
+      const piece = document.createElement('div');
+      piece.style.position = 'absolute';
+      piece.style.top = '-16px';
+      piece.style.left = `${Math.random() * 100}%`;
+      piece.style.width = `${6 + Math.random() * 7}px`;
+      piece.style.height = `${8 + Math.random() * 8}px`;
+      piece.style.opacity = '0.95';
+      piece.style.borderRadius = '1px';
+      piece.style.background = colors[i % colors.length];
+      layer.appendChild(piece);
+      const drift = (Math.random() - 0.5) * 180;
+      const rotate = (Math.random() - 0.5) * 680;
+      const fallDuration = 1400 + Math.random() * 1600;
+      piece.animate(
+        [
+          { transform: 'translate3d(0, 0, 0) rotate(0deg)', opacity: 1 },
+          { transform: `translate3d(${drift}px, ${window.innerHeight * 0.75}px, 0) rotate(${rotate}deg)`, opacity: 0.1 },
+        ],
+        {
+          duration: fallDuration,
+          delay: Math.random() * 450,
+          easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+          fill: 'forwards',
+        },
+      ).onfinish = () => piece.remove();
+    }
+    const cleanupTimer = window.setTimeout(() => layer.remove(), 2600);
+    this.activeResourceFxTimers.push(cleanupTimer);
   }
 
   private refreshBottomBarThemeFromGameState(): void {
@@ -1632,6 +1938,9 @@ export class GameBoardScreen {
   }
 
   private handleMapPlaceClick(hit: MapPointerHit): void {
+    if (this.isGameOver) {
+      return;
+    }
     console.log('[Settlement] Map click:', hit);
     if (!this.pendingBuild) {
       console.log('[Settlement] No pending build');
@@ -1882,6 +2191,9 @@ export class GameBoardScreen {
   }
 
   private handleRollDiceClick(): void {
+    if (this.isGameOver) {
+      return;
+    }
     if (this.turnHudBindings?.onRollDice) {
       this.startLocalDiceRollAnimation();
       this.turnHudBindings.onRollDice();
@@ -1938,6 +2250,9 @@ export class GameBoardScreen {
   }
   
   private handleBankTradeClick(): void {
+    if (this.isGameOver) {
+      return;
+    }
     const roomId = getLobbySession()?.roomId ?? null;
     if (!roomId) {
       return;
@@ -1974,6 +2289,9 @@ export class GameBoardScreen {
   }
 
   private handleEndTurnClick(): void {
+    if (this.isGameOver) {
+      return;
+    }
     if (this.turnHudBindings?.onEndTurn) {
       this.turnHudBindings.onEndTurn();
       this.updateTurnHud();
@@ -2581,6 +2899,7 @@ export class GameBoardScreen {
     this.dismissBuildRecipePopover();
     this.closeGameSettingsPanel();
     this.closeGameRulesPanel();
+    this.closeWinnerOverlay();
     if (this.gameSettingsBackdrop) {
       this.gameSettingsBackdrop.remove();
       this.gameSettingsBackdrop = null;
@@ -2649,6 +2968,9 @@ export class GameBoardScreen {
     this.chatInput = null;
     this.statusChatLog = [];
     this.lastStatusLogKey = null;
+    this.lastAnnouncedWinnerPlayerId = null;
+    this.isGameOver = false;
+    this.navigateToScreen = null;
     this.mapScreen?.destroy();
     this.mapScreen = null;
     this.liveGameState = null;

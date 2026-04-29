@@ -77,7 +77,7 @@ export class HostGameScreen {
           config: {
             playerCount: Number(sizeSelect.value),
             goalCount: 0,
-            winRule: 'ALL_GOALS_COMPLETE',
+            winRule: 'FIRST_TO_X_POINTS',
             mapSeed: 0,
             mapSize: 'medium',
             timerEnabled: false,
