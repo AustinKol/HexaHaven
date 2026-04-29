@@ -5,6 +5,30 @@ import { resetClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
 import { createMusicToggleButton } from '../ui/musicToggleButton';
 
+const copyTextToClipboard = async (text: string): Promise<boolean> => {
+  try {
+    if (window.navigator.clipboard?.writeText) {
+      await window.navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_error) {
+    // Fall through to legacy copy behavior.
+  }
+
+  const textArea = document.createElement('textarea');
+  textArea.value = text;
+  textArea.setAttribute('readonly', 'true');
+  textArea.style.position = 'fixed';
+  textArea.style.opacity = '0';
+  textArea.style.pointerEvents = 'none';
+  document.body.appendChild(textArea);
+  textArea.select();
+  textArea.setSelectionRange(0, text.length);
+  const didCopy = document.execCommand('copy');
+  document.body.removeChild(textArea);
+  return didCopy;
+};
+
 export class WaitingRoomScreen {
   readonly id = ScreenId.WaitingRoom;
   private container: HTMLElement | null = null;
@@ -36,12 +60,13 @@ export class WaitingRoomScreen {
     keyLabel.textContent = 'Share this game key:';
 
     const keyValue = document.createElement('button');
+    keyValue.type = 'button';
     keyValue.className = 'font-mono text-2xl tracking-widest bg-slate-800 border border-slate-600 rounded-lg px-4 py-2 mb-4 hover:bg-slate-700 transition-colors';
     keyValue.textContent = session.roomId;
     keyValue.title = 'Click to copy key';
     keyValue.addEventListener('click', async () => {
-      await window.navigator.clipboard.writeText(session.roomId);
-      keyValue.textContent = `${session.roomId} (copied)`;
+      const copied = await copyTextToClipboard(session.roomId);
+      keyValue.textContent = copied ? `${session.roomId} (copied)` : `${session.roomId} (copy failed)`;
       window.setTimeout(() => {
         keyValue.textContent = session.roomId;
       }, 1000);
