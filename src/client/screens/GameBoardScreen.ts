@@ -2,11 +2,24 @@ import { playBuildPlacementSound, playDiceRollSound, playVictoryFanfareSound } f
 import { BASE_GAME_BOARD_MUSIC_VOLUME, scaledBoardMusicVolume } from '../audio/musicVolume';
 import { ClientEnv } from '../config/env';
 import { BUILD_COSTS } from '../../shared/buildRules';
+import { SERVER_EVENTS } from '../../shared/constants/socketEvents';
 import { loadSettings, saveSettings, SETTINGS_CHANGED_EVENT, type GameSettings } from '../settings/gameSettings';
 import { ScreenId } from '../../shared/constants/screenIds';
-import type { ActionRejectedEvent } from '../../shared/types/socket';
+import type { ActionRejectedEvent, PlayerTradeRequest, PlayerTradeRequestUpdateEvent } from '../../shared/types/socket';
 import type { DiceRoll, GamePhase, GameState, ResourceBundle } from '../../shared/types/domain';
-import { bankTrade, buildStructure, connectSocket, disconnectSocket, endTurn, hydrateSession, rollDice, sendChatMessage } from '../networking/socketClient';
+import {
+  bankTrade,
+  buildStructure,
+  connectSocket,
+  disconnectSocket,
+  endTurn,
+  getSocket,
+  hydrateSession,
+  respondPlayerTradeRequest,
+  rollDice,
+  sendChatMessage,
+  sendPlayerTradeRequest,
+} from '../networking/socketClient';
 import { clientState, resetClientState, subscribeClientState } from '../state/clientState';
 import { clearLobbySession, getLobbySession } from '../state/lobbyState';
 
@@ -25,6 +38,9 @@ const TURN_TIMER_WARNING_SECONDS = 15;
 const CLIENT_WIN_VP_FALLBACK = 10;
 const TUTORIAL_MODE_STORAGE_KEY = 'hexahaven.tutorialModeEnabled';
 const YOUR_TURN_TOAST_MS = 3000;
+const PLAYER_TRADE_REQUEST_TTL_MS = 10_000;
+const TRADE_NOTICE_MS = 3200;
+const TRADE_PANEL_CHAT_GUARD_PX = 190;
 
 /** Matches map biome feel (see TestMapGenScreen BIOME_PALETTE); tuned for UI legibility. */
 const RESOURCE_BOX_CONFIG: {
@@ -174,6 +190,18 @@ function emptyResourceBundle(): ResourceBundle {
   return { CRYSTAL: 0, STONE: 0, BLOOM: 0, EMBER: 0, GOLD: 0 };
 }
 
+function resourceBundleTotal(bundle: ResourceBundle): number {
+  return RESOURCE_KEYS.reduce((sum, key) => sum + inventoryCount(bundle[key]), 0);
+}
+
+function hasRequiredResources(available: ResourceBundle, required: ResourceBundle): boolean {
+  return RESOURCE_KEYS.every((key) => inventoryCount(available[key]) >= inventoryCount(required[key]));
+}
+
+function isEmptyResourceBundle(bundle: ResourceBundle): boolean {
+  return resourceBundleTotal(bundle) <= 0;
+}
+
 /** Whole-number counts only (no decimals in UI or inventory math). */
 function inventoryCount(n: unknown): number {
   const v = typeof n === 'number' && Number.isFinite(n) ? n : 0;
@@ -183,6 +211,8 @@ function inventoryCount(n: unknown): number {
 type BuildKind = 'ROAD' | 'SETTLEMENT' | 'CITY';
 type TutorialTarget = 'ROLL' | 'SETTLEMENT' | 'ROAD' | 'CITY' | 'BANK_TRADE' | 'END_TURN';
 type TutorialPlacement = 'above' | 'below';
+type TradePanelTab = 'BANK' | 'PLAYER';
+type TradeNoticeTone = 'info' | 'success' | 'error';
 
 interface TutorialPrompt {
   key: string;
@@ -349,6 +379,30 @@ export class GameBoardScreen {
   private bankReceiveSelection: ResourceKey = 'STONE';
   private bankGiveButtons: Partial<Record<ResourceKey, HTMLButtonElement>> = {};
   private bankReceiveButtons: Partial<Record<ResourceKey, HTMLButtonElement>> = {};
+  private tradePanelTab: TradePanelTab = 'BANK';
+  private tradeTabsBankButton: HTMLButtonElement | null = null;
+  private tradeTabsPlayerButton: HTMLButtonElement | null = null;
+  private tradeBankContent: HTMLDivElement | null = null;
+  private tradePlayerContent: HTMLDivElement | null = null;
+  private tradePlayerBody: HTMLDivElement | null = null;
+  private tradeNoticeEl: HTMLDivElement | null = null;
+  private tradeNoticeHideTimer: number | null = null;
+  private playerTradeTargetPlayerId: string | null = null;
+  private playerTradeOfferSelection: ResourceBundle = emptyResourceBundle();
+  private playerTradeRequestSelection: ResourceBundle = emptyResourceBundle();
+  private pendingOutgoingTradeIds = new Set<string>();
+  private isSendingPlayerTradeRequest = false;
+  private tradeEventSocket: ReturnType<typeof getSocket> = null;
+  private incomingTradeRequest: PlayerTradeRequest | null = null;
+  private incomingTradeCard: HTMLDivElement | null = null;
+  private incomingTradeSenderTextEl: HTMLDivElement | null = null;
+  private incomingTradeOfferTextEl: HTMLDivElement | null = null;
+  private incomingTradeRequestTextEl: HTMLDivElement | null = null;
+  private incomingTradeProgressFillEl: HTMLDivElement | null = null;
+  private incomingTradeAcceptButton: HTMLButtonElement | null = null;
+  private incomingTradeDenyButton: HTMLButtonElement | null = null;
+  private incomingTradeCountdownTimer: number | null = null;
+  private isRespondingToTradeRequest = false;
   private buttonContainer: HTMLElement | null = null;
   private isMusicMuted = false;
   private turnHudBindings: GameBoardTurnHudBindings | null = null;
@@ -369,10 +423,17 @@ export class GameBoardScreen {
   private readonly onWindowResize = (): void => {
     this.repositionYourTurnToast();
     this.repositionTutorialPrompt();
+    this.repositionIncomingTradeCard();
   };
   private readonly onSettingsChanged = (): void => {
     this.backgroundMusic.volume = scaledBoardMusicVolume(BASE_GAME_BOARD_MUSIC_VOLUME);
     this.syncGameSettingsPanelSliders();
+  };
+  private readonly onPlayerTradeRequestReceived = (tradeRequest: PlayerTradeRequest): void => {
+    this.handlePlayerTradeRequestReceived(tradeRequest);
+  };
+  private readonly onPlayerTradeRequestUpdated = (event: PlayerTradeRequestUpdateEvent): void => {
+    this.handlePlayerTradeRequestUpdated(event);
   };
 
   private resolveTurnEndsAtMs(gameState: GameState | null): number | null {
@@ -612,12 +673,14 @@ export class GameBoardScreen {
     this.mountYourTurnToast(this.buttonContainer);
     this.mountTutorialOverlay(this.buttonContainer);
     this.mountPlayerPanel(this.buttonContainer);
+    this.mountIncomingTradeCard(this.buttonContainer);
     this.mountTurnHud(this.buttonContainer);
     this.startTurnTimerTicker();
     this.mountChatPanel(this.buttonContainer);
     this.mountResourceBar(this.buttonContainer);
     if (roomId) {
       connectSocket({ gameId: roomId, playerId: session?.playerId });
+      this.bindPlayerTradeSocketEvents();
       void hydrateSession(roomId).catch((error) => {
         console.error('Failed to hydrate game session:', error);
       });
@@ -637,6 +700,7 @@ export class GameBoardScreen {
         this.syncTutorialPrompt();
       });
     } else {
+      this.unbindPlayerTradeSocketEvents();
       this.liveGameState = clientState.gameState;
       this.refreshPlayerUi();
       this.maybeHandleWinnerState(null, this.liveGameState);
@@ -740,6 +804,73 @@ export class GameBoardScreen {
     panel.style.width = '128px';
     this.playerPanel = panel;
     parent.appendChild(panel);
+  }
+
+  private mountIncomingTradeCard(parent: HTMLElement): void {
+    if (this.incomingTradeCard) {
+      this.incomingTradeCard.remove();
+    }
+
+    const card = document.createElement('div');
+    card.className = 'hexahaven-incoming-trade-card';
+
+    const title = document.createElement('div');
+    title.className = 'hexahaven-incoming-trade-title';
+    title.textContent = 'Incoming Trade';
+    card.appendChild(title);
+
+    const senderText = document.createElement('div');
+    senderText.className = 'hexahaven-incoming-trade-sender';
+    card.appendChild(senderText);
+
+    const offerText = document.createElement('div');
+    offerText.className = 'hexahaven-incoming-trade-line';
+    card.appendChild(offerText);
+
+    const requestText = document.createElement('div');
+    requestText.className = 'hexahaven-incoming-trade-line';
+    card.appendChild(requestText);
+
+    const actions = document.createElement('div');
+    actions.className = 'hexahaven-incoming-trade-actions';
+
+    const acceptButton = document.createElement('button');
+    acceptButton.type = 'button';
+    acceptButton.className = 'hexahaven-incoming-trade-btn is-accept font-hexahaven-ui';
+    acceptButton.textContent = 'Accept';
+    acceptButton.addEventListener('click', () => {
+      this.handleRespondToIncomingTrade('accepted');
+    });
+
+    const denyButton = document.createElement('button');
+    denyButton.type = 'button';
+    denyButton.className = 'hexahaven-incoming-trade-btn is-deny font-hexahaven-ui';
+    denyButton.textContent = 'Deny';
+    denyButton.addEventListener('click', () => {
+      this.handleRespondToIncomingTrade('declined');
+    });
+
+    actions.appendChild(acceptButton);
+    actions.appendChild(denyButton);
+    card.appendChild(actions);
+
+    const progress = document.createElement('div');
+    progress.className = 'hexahaven-incoming-trade-progress';
+    const fill = document.createElement('div');
+    fill.className = 'hexahaven-incoming-trade-progress-fill';
+    progress.appendChild(fill);
+    card.appendChild(progress);
+
+    this.incomingTradeCard = card;
+    this.incomingTradeSenderTextEl = senderText;
+    this.incomingTradeOfferTextEl = offerText;
+    this.incomingTradeRequestTextEl = requestText;
+    this.incomingTradeProgressFillEl = fill;
+    this.incomingTradeAcceptButton = acceptButton;
+    this.incomingTradeDenyButton = denyButton;
+    parent.appendChild(card);
+    this.refreshIncomingTradeCardUi();
+    this.repositionIncomingTradeCard();
   }
 
   private mountBuildRejectToast(parent: HTMLElement): void {
@@ -927,6 +1058,9 @@ export class GameBoardScreen {
       case 'CITY':
         return this.buildButtons.CITY ?? null;
       case 'BANK_TRADE':
+        if (this.tradePanelTab !== 'BANK') {
+          return null;
+        }
         return this.bankTradeButton;
       case 'END_TURN':
         return this.endTurnButton;
@@ -1159,6 +1293,725 @@ export class GameBoardScreen {
     this.showBuildRejectToast(toFriendlyBuildRejectionMessage(rejection));
   }
 
+  private bindPlayerTradeSocketEvents(): void {
+    const socket = getSocket();
+    if (!socket || this.tradeEventSocket === socket) {
+      return;
+    }
+    this.unbindPlayerTradeSocketEvents();
+    socket.on(SERVER_EVENTS.PLAYER_TRADE_REQUEST_RECEIVED, this.onPlayerTradeRequestReceived);
+    socket.on(SERVER_EVENTS.PLAYER_TRADE_REQUEST_UPDATED, this.onPlayerTradeRequestUpdated);
+    this.tradeEventSocket = socket;
+  }
+
+  private unbindPlayerTradeSocketEvents(): void {
+    if (!this.tradeEventSocket) {
+      return;
+    }
+    this.tradeEventSocket.off(SERVER_EVENTS.PLAYER_TRADE_REQUEST_RECEIVED, this.onPlayerTradeRequestReceived);
+    this.tradeEventSocket.off(SERVER_EVENTS.PLAYER_TRADE_REQUEST_UPDATED, this.onPlayerTradeRequestUpdated);
+    this.tradeEventSocket = null;
+  }
+
+  private resolveLocalPlayerId(): string | null {
+    const localPlayerId = this.livePlayerId ?? clientState.playerId;
+    if (!localPlayerId || localPlayerId === 'spectator') {
+      return null;
+    }
+    return localPlayerId;
+  }
+
+  private resolvePlayerDisplayName(playerId: string): string {
+    return this.liveGameState?.playersById[playerId]?.displayName ?? 'Player';
+  }
+
+  private formatResourceBundleSummary(bundle: ResourceBundle): string {
+    const parts = RESOURCE_KEYS
+      .filter((key) => inventoryCount(bundle[key]) > 0)
+      .map((key) => `${inventoryCount(bundle[key])} ${RESOURCE_LABELS[key]}`);
+    return parts.length > 0 ? parts.join(', ') : 'None';
+  }
+
+  private clearTradeNoticeTimers(): void {
+    if (this.tradeNoticeHideTimer !== null) {
+      clearTimeout(this.tradeNoticeHideTimer);
+      this.tradeNoticeHideTimer = null;
+    }
+  }
+
+  private showTradeNotice(message: string, tone: TradeNoticeTone = 'info'): void {
+    if (!this.tradeNoticeEl) {
+      return;
+    }
+    this.clearTradeNoticeTimers();
+    this.tradeNoticeEl.textContent = message;
+    this.tradeNoticeEl.dataset.tone = tone;
+    this.tradeNoticeEl.classList.remove('is-hiding');
+    this.tradeNoticeEl.classList.remove('is-visible');
+    void this.tradeNoticeEl.offsetWidth;
+    this.tradeNoticeEl.classList.add('is-visible');
+    this.tradeNoticeHideTimer = window.setTimeout(() => {
+      if (!this.tradeNoticeEl) {
+        return;
+      }
+      this.tradeNoticeEl.classList.remove('is-visible');
+      this.tradeNoticeEl.classList.add('is-hiding');
+      this.tradeNoticeHideTimer = null;
+    }, TRADE_NOTICE_MS);
+  }
+
+  private resetPlayerTradeDraft(resetTarget: boolean): void {
+    if (resetTarget) {
+      this.playerTradeTargetPlayerId = null;
+    }
+    this.playerTradeOfferSelection = emptyResourceBundle();
+    this.playerTradeRequestSelection = emptyResourceBundle();
+  }
+
+  private setTradePanelTab(tab: TradePanelTab): void {
+    if (this.tradePanelTab === tab) {
+      return;
+    }
+    this.tradePanelTab = tab;
+    this.syncTradePanelTabs();
+    this.refreshPlayerTradeUi();
+  }
+
+  private syncTradePanelTabs(): void {
+    const isBank = this.tradePanelTab === 'BANK';
+    if (this.tradeTabsBankButton) {
+      this.tradeTabsBankButton.classList.toggle('is-active', isBank);
+      this.tradeTabsBankButton.setAttribute('aria-pressed', isBank ? 'true' : 'false');
+    }
+    if (this.tradeTabsPlayerButton) {
+      this.tradeTabsPlayerButton.classList.toggle('is-active', !isBank);
+      this.tradeTabsPlayerButton.setAttribute('aria-pressed', !isBank ? 'true' : 'false');
+    }
+    if (this.tradeBankContent) {
+      this.tradeBankContent.style.display = isBank ? 'flex' : 'none';
+    }
+    if (this.tradePlayerContent) {
+      this.tradePlayerContent.style.display = isBank ? 'none' : 'flex';
+    }
+  }
+
+  private clampPlayerTradeSelections(): void {
+    const gameState = this.liveGameState ?? clientState.gameState;
+    const localPlayerId = this.resolveLocalPlayerId();
+    if (!gameState || !localPlayerId) {
+      this.resetPlayerTradeDraft(true);
+      return;
+    }
+
+    const localPlayer = gameState.playersById[localPlayerId];
+    if (!localPlayer) {
+      this.resetPlayerTradeDraft(true);
+      return;
+    }
+
+    if (!this.playerTradeTargetPlayerId || !gameState.playersById[this.playerTradeTargetPlayerId]) {
+      this.playerTradeTargetPlayerId = null;
+      this.playerTradeRequestSelection = emptyResourceBundle();
+    }
+
+    const target = this.playerTradeTargetPlayerId ? gameState.playersById[this.playerTradeTargetPlayerId] : null;
+    RESOURCE_KEYS.forEach((resourceKey) => {
+      const offerMax = inventoryCount(localPlayer.resources[resourceKey]);
+      const requestMax = target ? inventoryCount(target.resources[resourceKey]) : 0;
+      this.playerTradeOfferSelection[resourceKey] = Math.min(
+        inventoryCount(this.playerTradeOfferSelection[resourceKey]),
+        offerMax,
+      );
+      this.playerTradeRequestSelection[resourceKey] = Math.min(
+        inventoryCount(this.playerTradeRequestSelection[resourceKey]),
+        requestMax,
+      );
+    });
+  }
+
+  private appendTradeSelectionChips(parent: HTMLElement, bundle: ResourceBundle, emptyLabel: string): void {
+    const entries = RESOURCE_KEYS.filter((resourceKey) => inventoryCount(bundle[resourceKey]) > 0);
+    if (entries.length === 0) {
+      const empty = document.createElement('span');
+      empty.className = 'hexahaven-trade-summary-empty';
+      empty.textContent = emptyLabel;
+      parent.appendChild(empty);
+      return;
+    }
+    entries.forEach((resourceKey) => {
+      const chip = document.createElement('span');
+      chip.className = 'hexahaven-trade-summary-chip';
+      chip.textContent = `${inventoryCount(bundle[resourceKey])} ${RESOURCE_LABELS[resourceKey]}`;
+      parent.appendChild(chip);
+    });
+  }
+
+  private resolvePlayerTradeAvailability(): { allowed: boolean; reason: string | null } {
+    const gameState = this.liveGameState ?? clientState.gameState;
+    const localPlayerId = this.resolveLocalPlayerId();
+    if (!gameState || !localPlayerId) {
+      return { allowed: false, reason: 'Waiting for game state.' };
+    }
+    const localPlayer = gameState.playersById[localPlayerId];
+    if (!localPlayer) {
+      return { allowed: false, reason: 'Local player not found.' };
+    }
+    if (gameState.roomStatus !== 'in_progress') {
+      return { allowed: false, reason: 'Trades are only available during active games.' };
+    }
+    if (!this.playerTradeTargetPlayerId) {
+      return { allowed: false, reason: 'Select a player to trade with.' };
+    }
+    const targetPlayer = gameState.playersById[this.playerTradeTargetPlayerId];
+    if (!targetPlayer) {
+      return { allowed: false, reason: 'Selected player is unavailable.' };
+    }
+    if (gameState.turn.currentPlayerId !== localPlayerId) {
+      return { allowed: false, reason: 'You can only send trades during your turn.' };
+    }
+    if (gameState.turn.phase !== 'ACTION') {
+      return { allowed: false, reason: 'You can only send trades during ACTION phase.' };
+    }
+    if (isEmptyResourceBundle(this.playerTradeOfferSelection)) {
+      return { allowed: false, reason: 'Add resources to your offer.' };
+    }
+    if (isEmptyResourceBundle(this.playerTradeRequestSelection)) {
+      return { allowed: false, reason: 'Add resources to your request.' };
+    }
+    if (!hasRequiredResources(localPlayer.resources, this.playerTradeOfferSelection)) {
+      return { allowed: false, reason: 'You no longer have enough resources for this offer.' };
+    }
+    if (!hasRequiredResources(targetPlayer.resources, this.playerTradeRequestSelection)) {
+      return { allowed: false, reason: `${targetPlayer.displayName} no longer has enough requested resources.` };
+    }
+    if (this.isSendingPlayerTradeRequest) {
+      return { allowed: false, reason: 'Sending trade request...' };
+    }
+    return { allowed: true, reason: null };
+  }
+
+  private incrementPlayerTradeSelection(
+    side: 'offer' | 'request',
+    resourceKey: ResourceKey,
+  ): void {
+    const gameState = this.liveGameState ?? clientState.gameState;
+    const localPlayerId = this.resolveLocalPlayerId();
+    if (!gameState || !localPlayerId) {
+      return;
+    }
+    const localPlayer = gameState.playersById[localPlayerId];
+    if (!localPlayer) {
+      return;
+    }
+
+    if (side === 'offer') {
+      const available = inventoryCount(localPlayer.resources[resourceKey]);
+      const selected = inventoryCount(this.playerTradeOfferSelection[resourceKey]);
+      if (selected >= available) {
+        return;
+      }
+      this.playerTradeOfferSelection = {
+        ...this.playerTradeOfferSelection,
+        [resourceKey]: selected + 1,
+      };
+      this.refreshPlayerTradeUi();
+      return;
+    }
+
+    if (!this.playerTradeTargetPlayerId) {
+      return;
+    }
+    const targetPlayer = gameState.playersById[this.playerTradeTargetPlayerId];
+    if (!targetPlayer) {
+      return;
+    }
+    const available = inventoryCount(targetPlayer.resources[resourceKey]);
+    const selected = inventoryCount(this.playerTradeRequestSelection[resourceKey]);
+    if (selected >= available) {
+      return;
+    }
+    this.playerTradeRequestSelection = {
+      ...this.playerTradeRequestSelection,
+      [resourceKey]: selected + 1,
+    };
+    this.refreshPlayerTradeUi();
+  }
+
+  private clearPlayerTradeSelection(side: 'offer' | 'request' | 'all'): void {
+    if (side === 'all') {
+      this.playerTradeOfferSelection = emptyResourceBundle();
+      this.playerTradeRequestSelection = emptyResourceBundle();
+      this.refreshPlayerTradeUi();
+      return;
+    }
+    if (side === 'offer') {
+      this.playerTradeOfferSelection = emptyResourceBundle();
+      this.refreshPlayerTradeUi();
+      return;
+    }
+    this.playerTradeRequestSelection = emptyResourceBundle();
+    this.refreshPlayerTradeUi();
+  }
+
+  private refreshPlayerTradeUi(): void {
+    this.clampPlayerTradeSelections();
+    this.renderPlayerTradeBody();
+  }
+
+  private renderPlayerTradeBody(): void {
+    if (!this.tradePlayerBody) {
+      return;
+    }
+    this.tradePlayerBody.innerHTML = '';
+    const gameState = this.liveGameState ?? clientState.gameState;
+    const localPlayerId = this.resolveLocalPlayerId();
+    if (!gameState || !localPlayerId) {
+      const waiting = document.createElement('div');
+      waiting.className = 'hexahaven-trade-empty-hint';
+      waiting.textContent = 'Waiting for game state...';
+      this.tradePlayerBody.appendChild(waiting);
+      return;
+    }
+    const localPlayer = gameState.playersById[localPlayerId];
+    if (!localPlayer) {
+      const waiting = document.createElement('div');
+      waiting.className = 'hexahaven-trade-empty-hint';
+      waiting.textContent = 'Player data unavailable.';
+      this.tradePlayerBody.appendChild(waiting);
+      return;
+    }
+
+    const otherPlayers = gameState.playerOrder
+      .filter((playerId) => playerId !== localPlayerId)
+      .map((playerId) => gameState.playersById[playerId])
+      .filter((player): player is NonNullable<typeof player> => Boolean(player));
+
+    const targetsSection = document.createElement('div');
+    targetsSection.className = 'hexahaven-trade-section';
+    const targetsTitle = document.createElement('div');
+    targetsTitle.className = 'hexahaven-trade-section-title';
+    targetsTitle.textContent = 'Trade With';
+    targetsSection.appendChild(targetsTitle);
+
+    const targetsRow = document.createElement('div');
+    targetsRow.className = 'hexahaven-trade-target-row';
+    otherPlayers.forEach((player) => {
+      const targetButton = document.createElement('button');
+      targetButton.type = 'button';
+      targetButton.className = 'hexahaven-trade-target-btn font-hexahaven-ui';
+      targetButton.classList.toggle('is-active', this.playerTradeTargetPlayerId === player.playerId);
+      targetButton.setAttribute('aria-pressed', this.playerTradeTargetPlayerId === player.playerId ? 'true' : 'false');
+      targetButton.addEventListener('click', () => {
+        if (this.playerTradeTargetPlayerId !== player.playerId) {
+          this.playerTradeTargetPlayerId = player.playerId;
+          this.resetPlayerTradeDraft(false);
+        }
+        this.refreshPlayerTradeUi();
+      });
+
+      const avatar = document.createElement('img');
+      avatar.src = player.avatarUrl ?? '/avatar/avatar_1.png';
+      avatar.alt = `${player.displayName} avatar`;
+      avatar.className = 'hexahaven-trade-target-avatar';
+      targetButton.appendChild(avatar);
+
+      const name = document.createElement('span');
+      name.className = 'hexahaven-trade-target-name';
+      name.textContent = player.displayName;
+      name.style.color = player.color || '#e2e8f0';
+      targetButton.appendChild(name);
+
+      const presence = document.createElement('span');
+      presence.className = `hexahaven-trade-target-presence ${player.presence?.isConnected ? 'is-online' : 'is-offline'}`;
+      targetButton.appendChild(presence);
+
+      targetsRow.appendChild(targetButton);
+    });
+    targetsSection.appendChild(targetsRow);
+    this.tradePlayerBody.appendChild(targetsSection);
+
+    const targetPlayer = this.playerTradeTargetPlayerId ? gameState.playersById[this.playerTradeTargetPlayerId] : null;
+    if (!targetPlayer) {
+      const selectHint = document.createElement('div');
+      selectHint.className = 'hexahaven-trade-empty-hint';
+      selectHint.textContent = 'Choose a target player to build a trade.';
+      this.tradePlayerBody.appendChild(selectHint);
+      return;
+    }
+
+    const createResourcePicker = (
+      title: string,
+      source: ResourceBundle,
+      selected: ResourceBundle,
+      side: 'offer' | 'request',
+    ): HTMLDivElement => {
+      const section = document.createElement('div');
+      section.className = 'hexahaven-trade-section';
+      const heading = document.createElement('div');
+      heading.className = 'hexahaven-trade-section-title';
+      heading.textContent = title;
+      section.appendChild(heading);
+
+      const grid = document.createElement('div');
+      grid.className = 'hexahaven-trade-resource-grid';
+      RESOURCE_BOX_CONFIG.forEach(({ key, iconSrc, shortLabel, boxBg, boxBorder, countColor }) => {
+        const available = inventoryCount(source[key]);
+        const selectedCount = inventoryCount(selected[key]);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'hexahaven-trade-resource-btn';
+        button.style.backgroundColor = boxBg;
+        button.style.borderColor = selectedCount > 0 ? '#34d399' : boxBorder;
+        button.style.color = countColor;
+        button.disabled = available <= 0 || selectedCount >= available;
+        button.setAttribute('aria-label', `${RESOURCE_LABELS[key]} (${available})`);
+        button.addEventListener('click', () => this.incrementPlayerTradeSelection(side, key));
+
+        const iconWrap = document.createElement('span');
+        iconWrap.className = 'hexahaven-trade-resource-icon';
+        if (iconSrc) {
+          const img = document.createElement('img');
+          img.src = iconSrc;
+          img.alt = shortLabel;
+          img.draggable = false;
+          img.className = 'h-6 w-6 object-contain';
+          iconWrap.appendChild(img);
+        } else {
+          iconWrap.textContent = shortLabel;
+        }
+        button.appendChild(iconWrap);
+
+        const amount = document.createElement('span');
+        amount.className = 'hexahaven-trade-resource-count';
+        amount.textContent = `${selectedCount}/${available}`;
+        button.appendChild(amount);
+        grid.appendChild(button);
+      });
+      section.appendChild(grid);
+      return section;
+    };
+
+    this.tradePlayerBody.appendChild(
+      createResourcePicker(`${targetPlayer.displayName}'s Resources (You Request)`, targetPlayer.resources, this.playerTradeRequestSelection, 'request'),
+    );
+    this.tradePlayerBody.appendChild(
+      createResourcePicker('Your Resources (You Offer)', localPlayer.resources, this.playerTradeOfferSelection, 'offer'),
+    );
+
+    const summary = document.createElement('div');
+    summary.className = 'hexahaven-trade-summary';
+
+    const offerRow = document.createElement('div');
+    offerRow.className = 'hexahaven-trade-summary-row';
+    const offerLabel = document.createElement('span');
+    offerLabel.className = 'hexahaven-trade-summary-label';
+    offerLabel.textContent = 'You offer:';
+    offerRow.appendChild(offerLabel);
+    const offerValues = document.createElement('div');
+    offerValues.className = 'hexahaven-trade-summary-values';
+    this.appendTradeSelectionChips(offerValues, this.playerTradeOfferSelection, 'None');
+    offerRow.appendChild(offerValues);
+    summary.appendChild(offerRow);
+
+    const requestRow = document.createElement('div');
+    requestRow.className = 'hexahaven-trade-summary-row';
+    const requestLabel = document.createElement('span');
+    requestLabel.className = 'hexahaven-trade-summary-label';
+    requestLabel.textContent = 'You request:';
+    requestRow.appendChild(requestLabel);
+    const requestValues = document.createElement('div');
+    requestValues.className = 'hexahaven-trade-summary-values';
+    this.appendTradeSelectionChips(requestValues, this.playerTradeRequestSelection, 'None');
+    requestRow.appendChild(requestValues);
+    summary.appendChild(requestRow);
+    this.tradePlayerBody.appendChild(summary);
+
+    const clearRow = document.createElement('div');
+    clearRow.className = 'hexahaven-trade-clear-row';
+    const clearOffer = document.createElement('button');
+    clearOffer.type = 'button';
+    clearOffer.className = 'hexahaven-trade-clear-btn font-hexahaven-ui';
+    clearOffer.textContent = 'Clear Offer';
+    clearOffer.addEventListener('click', () => this.clearPlayerTradeSelection('offer'));
+    const clearRequest = document.createElement('button');
+    clearRequest.type = 'button';
+    clearRequest.className = 'hexahaven-trade-clear-btn font-hexahaven-ui';
+    clearRequest.textContent = 'Clear Request';
+    clearRequest.addEventListener('click', () => this.clearPlayerTradeSelection('request'));
+    const clearAll = document.createElement('button');
+    clearAll.type = 'button';
+    clearAll.className = 'hexahaven-trade-clear-btn font-hexahaven-ui';
+    clearAll.textContent = 'Clear All';
+    clearAll.addEventListener('click', () => this.clearPlayerTradeSelection('all'));
+    clearRow.appendChild(clearOffer);
+    clearRow.appendChild(clearRequest);
+    clearRow.appendChild(clearAll);
+    this.tradePlayerBody.appendChild(clearRow);
+
+    const sendState = this.resolvePlayerTradeAvailability();
+    const sendButton = document.createElement('button');
+    sendButton.type = 'button';
+    sendButton.className = 'hexahaven-trade-send-btn font-hexahaven-ui';
+    sendButton.textContent = this.isSendingPlayerTradeRequest ? 'Sending...' : 'Send Trade Request';
+    sendButton.disabled = !sendState.allowed;
+    sendButton.addEventListener('click', () => {
+      void this.handleSendPlayerTradeRequest();
+    });
+    this.tradePlayerBody.appendChild(sendButton);
+
+    const helper = document.createElement('div');
+    helper.className = 'hexahaven-trade-send-helper';
+    if (!sendState.allowed && sendState.reason) {
+      helper.textContent = sendState.reason;
+    } else if (this.pendingOutgoingTradeIds.size > 0) {
+      helper.textContent = `Pending trade requests: ${this.pendingOutgoingTradeIds.size}`;
+    } else {
+      helper.textContent = 'Trade requests expire after 10 seconds.';
+    }
+    this.tradePlayerBody.appendChild(helper);
+  }
+
+  private async handleSendPlayerTradeRequest(): Promise<void> {
+    const gameState = this.liveGameState ?? clientState.gameState;
+    const roomId = getLobbySession()?.roomId ?? null;
+    const localPlayerId = this.resolveLocalPlayerId();
+    if (!gameState || !roomId || !localPlayerId || !this.playerTradeTargetPlayerId) {
+      return;
+    }
+    const sendState = this.resolvePlayerTradeAvailability();
+    if (!sendState.allowed) {
+      if (sendState.reason) {
+        this.showTradeNotice(sendState.reason, 'error');
+      }
+      return;
+    }
+
+    const offeredResources: ResourceBundle = { ...this.playerTradeOfferSelection };
+    const requestedResources: ResourceBundle = { ...this.playerTradeRequestSelection };
+    const targetName = this.resolvePlayerDisplayName(this.playerTradeTargetPlayerId);
+
+    this.isSendingPlayerTradeRequest = true;
+    this.refreshPlayerTradeUi();
+    try {
+      const ack = await sendPlayerTradeRequest({
+        gameId: roomId,
+        receiverPlayerId: this.playerTradeTargetPlayerId,
+        offeredResources,
+        requestedResources,
+      });
+      this.pendingOutgoingTradeIds.add(ack.tradeRequest.id);
+      this.playerTradeOfferSelection = emptyResourceBundle();
+      this.playerTradeRequestSelection = emptyResourceBundle();
+      this.showTradeNotice(`Trade request sent to ${targetName}.`, 'info');
+    } catch (error) {
+      this.showTradeNotice(error instanceof Error ? error.message : 'Failed to send trade request.', 'error');
+    } finally {
+      this.isSendingPlayerTradeRequest = false;
+      this.refreshPlayerTradeUi();
+    }
+  }
+
+  private setIncomingTradeRequest(tradeRequest: PlayerTradeRequest | null): void {
+    this.incomingTradeRequest = tradeRequest;
+    if (!tradeRequest) {
+      this.isRespondingToTradeRequest = false;
+      this.clearIncomingTradeCountdownTimer();
+    } else {
+      this.startIncomingTradeCountdownTimer();
+    }
+    this.refreshIncomingTradeCardUi();
+    this.repositionIncomingTradeCard();
+  }
+
+  private clearIncomingTradeCountdownTimer(): void {
+    if (this.incomingTradeCountdownTimer !== null) {
+      clearInterval(this.incomingTradeCountdownTimer);
+      this.incomingTradeCountdownTimer = null;
+    }
+  }
+
+  private startIncomingTradeCountdownTimer(): void {
+    this.clearIncomingTradeCountdownTimer();
+    this.updateIncomingTradeCountdownUi();
+    this.incomingTradeCountdownTimer = window.setInterval(() => {
+      this.updateIncomingTradeCountdownUi();
+    }, 120);
+  }
+
+  private updateIncomingTradeCountdownUi(): void {
+    if (!this.incomingTradeRequest || !this.incomingTradeProgressFillEl) {
+      return;
+    }
+    const expiresAtMs = Date.parse(this.incomingTradeRequest.expiresAt);
+    if (!Number.isFinite(expiresAtMs)) {
+      this.incomingTradeProgressFillEl.style.width = '0%';
+      return;
+    }
+    const createdAtMs = Date.parse(this.incomingTradeRequest.createdAt);
+    const fallbackDurationMs = PLAYER_TRADE_REQUEST_TTL_MS;
+    const durationMs = Number.isFinite(createdAtMs) && (expiresAtMs as number) > createdAtMs
+      ? (expiresAtMs as number) - createdAtMs
+      : fallbackDurationMs;
+    const remainingMs = Math.max(0, (expiresAtMs as number) - Date.now());
+    const percent = Math.max(0, Math.min(100, (remainingMs / durationMs) * 100));
+    this.incomingTradeProgressFillEl.style.width = `${percent}%`;
+    if (remainingMs <= 0) {
+      this.clearIncomingTradeCountdownTimer();
+      this.incomingTradeRequest = null;
+      this.refreshIncomingTradeCardUi();
+      this.repositionIncomingTradeCard();
+    }
+  }
+
+  private refreshIncomingTradeCardUi(): void {
+    if (!this.incomingTradeCard) {
+      return;
+    }
+    const localPlayerId = this.resolveLocalPlayerId();
+    const incoming = this.incomingTradeRequest;
+    const isVisible = Boolean(incoming && localPlayerId && incoming.receiverPlayerId === localPlayerId);
+    this.incomingTradeCard.classList.toggle('is-visible', isVisible);
+    if (!isVisible || !incoming) {
+      this.clearIncomingTradeCountdownTimer();
+      return;
+    }
+
+    const senderName = this.resolvePlayerDisplayName(incoming.senderPlayerId);
+    if (this.incomingTradeSenderTextEl) {
+      this.incomingTradeSenderTextEl.textContent = `${senderName} sent an offer`;
+    }
+    if (this.incomingTradeOfferTextEl) {
+      this.incomingTradeOfferTextEl.textContent = `They offer: ${this.formatResourceBundleSummary(incoming.offeredResources)}`;
+    }
+    if (this.incomingTradeRequestTextEl) {
+      this.incomingTradeRequestTextEl.textContent = `They want: ${this.formatResourceBundleSummary(incoming.requestedResources)}`;
+    }
+    if (this.incomingTradeAcceptButton) {
+      this.incomingTradeAcceptButton.disabled = this.isRespondingToTradeRequest;
+    }
+    if (this.incomingTradeDenyButton) {
+      this.incomingTradeDenyButton.disabled = this.isRespondingToTradeRequest;
+    }
+    this.updateIncomingTradeCountdownUi();
+  }
+
+  private repositionIncomingTradeCard(): void {
+    if (!this.incomingTradeCard || !this.buttonContainer || !this.incomingTradeRequest) {
+      return;
+    }
+    if (!this.incomingTradeCard.classList.contains('is-visible')) {
+      return;
+    }
+    const containerRect = this.buttonContainer.getBoundingClientRect();
+    const senderCard = this.playerPanel?.querySelector(
+      `[data-player-id="${this.incomingTradeRequest.senderPlayerId}"]`,
+    ) as HTMLDivElement | null;
+
+    let left = 148;
+    let top = 14;
+    if (senderCard) {
+      const senderRect = senderCard.getBoundingClientRect();
+      left = senderRect.right - containerRect.left + 10;
+      top = senderRect.top - containerRect.top;
+    }
+
+    const cardWidth = this.incomingTradeCard.offsetWidth || 252;
+    const cardHeight = this.incomingTradeCard.offsetHeight || 164;
+    const maxLeft = containerRect.width - cardWidth - 8;
+    const maxTop = containerRect.height - GAME_BOARD_BOTTOM_BAR_PX - cardHeight - 8;
+    left = Math.max(8, Math.min(left, Math.max(8, maxLeft)));
+    top = Math.max(8, Math.min(top, Math.max(8, maxTop)));
+
+    this.incomingTradeCard.style.left = `${left}px`;
+    this.incomingTradeCard.style.top = `${top}px`;
+  }
+
+  private async handleRespondToIncomingTrade(response: 'accepted' | 'declined'): Promise<void> {
+    const incoming = this.incomingTradeRequest;
+    const roomId = getLobbySession()?.roomId ?? null;
+    if (!incoming || !roomId) {
+      return;
+    }
+    this.isRespondingToTradeRequest = true;
+    this.refreshIncomingTradeCardUi();
+    try {
+      await respondPlayerTradeRequest({
+        gameId: roomId,
+        tradeRequestId: incoming.id,
+        response,
+      });
+    } catch (error) {
+      this.showTradeNotice(error instanceof Error ? error.message : 'Failed to respond to trade.', 'error');
+    } finally {
+      this.isRespondingToTradeRequest = false;
+      this.refreshIncomingTradeCardUi();
+    }
+  }
+
+  private handlePlayerTradeRequestReceived(tradeRequest: PlayerTradeRequest): void {
+    const localPlayerId = this.resolveLocalPlayerId();
+    if (!localPlayerId || tradeRequest.receiverPlayerId !== localPlayerId) {
+      return;
+    }
+    this.setIncomingTradeRequest(tradeRequest);
+  }
+
+  private handlePlayerTradeRequestUpdated(event: PlayerTradeRequestUpdateEvent): void {
+    const localPlayerId = this.resolveLocalPlayerId();
+    if (!localPlayerId) {
+      return;
+    }
+
+    const tradeRequest = event.tradeRequest;
+    const isSender = tradeRequest.senderPlayerId === localPlayerId;
+    const isReceiver = tradeRequest.receiverPlayerId === localPlayerId;
+    if (!isSender && !isReceiver) {
+      return;
+    }
+
+    if (event.outcome === 'pending' && isSender) {
+      this.pendingOutgoingTradeIds.add(tradeRequest.id);
+    } else if (event.outcome !== 'pending') {
+      this.pendingOutgoingTradeIds.delete(tradeRequest.id);
+    }
+
+    if (isReceiver) {
+      if (event.outcome === 'pending') {
+        this.setIncomingTradeRequest(tradeRequest);
+      } else if (this.incomingTradeRequest?.id === tradeRequest.id) {
+        this.setIncomingTradeRequest(null);
+      }
+    }
+
+    const senderName = this.resolvePlayerDisplayName(tradeRequest.senderPlayerId);
+    const receiverName = this.resolvePlayerDisplayName(tradeRequest.receiverPlayerId);
+    if (isSender) {
+      if (event.outcome === 'accepted') {
+        this.showTradeNotice(`${receiverName} accepted your trade.`, 'success');
+      } else if (event.outcome === 'declined') {
+        this.showTradeNotice(`${receiverName} denied your trade.`, 'info');
+      } else if (event.outcome === 'expired') {
+        this.showTradeNotice('Trade request expired.', 'info');
+      } else if (event.outcome === 'failed') {
+        this.showTradeNotice(event.message || 'Trade request failed.', 'error');
+      } else if (event.outcome === 'pending') {
+        this.showTradeNotice(`Trade request sent to ${receiverName}.`, 'info');
+      }
+    } else if (isReceiver) {
+      if (event.outcome === 'accepted') {
+        this.showTradeNotice(`Trade accepted with ${senderName}.`, 'success');
+      } else if (event.outcome === 'expired') {
+        this.showTradeNotice('Trade request expired.', 'info');
+      } else if (event.outcome === 'failed') {
+        this.showTradeNotice(event.message || 'Trade request failed.', 'error');
+      }
+    }
+
+    this.refreshPlayerTradeUi();
+    this.refreshIncomingTradeCardUi();
+    this.repositionIncomingTradeCard();
+  }
+
   private ensureResourceFxLayer(parent: HTMLElement): void {
     if (this.resourceFxLayer) {
       this.resourceFxLayer.remove();
@@ -1220,18 +2073,29 @@ export class GameBoardScreen {
 
     this.bankGiveButtons = {};
     this.bankReceiveButtons = {};
+    this.tradeTabsBankButton = null;
+    this.tradeTabsPlayerButton = null;
+    this.tradeBankContent = null;
+    this.tradePlayerContent = null;
+    this.tradePlayerBody = null;
+    this.tradeNoticeEl = null;
+    this.clearTradeNoticeTimers();
 
     const panel = document.createElement('div');
     panel.className = 'absolute top-16 right-4 rounded-xl border border-slate-600 bg-slate-900/88 px-3 py-2 text-white shadow-md';
     panel.style.zIndex = '3';
     panel.style.width = '260px';
+    panel.style.maxHeight = `calc(100vh - ${GAME_BOARD_BOTTOM_BAR_PX + TRADE_PANEL_CHAT_GUARD_PX}px)`;
+    panel.style.display = 'flex';
+    panel.style.flexDirection = 'column';
+    panel.style.overflow = 'hidden';
 
     const header = document.createElement('div');
     header.className = 'mb-2 flex items-center justify-between gap-2';
 
     const title = document.createElement('div');
     title.className = 'font-hexahaven-ui text-xs font-semibold';
-    title.textContent = 'Turn HUD (DEMO)';
+    title.textContent = 'Trading';
     header.appendChild(title);
 
     if (ClientEnv.devUnlimitedMaterials) {
@@ -1274,7 +2138,32 @@ export class GameBoardScreen {
     dicePanel.appendChild(rollControls);
 
     const actions = document.createElement('div');
-    actions.className = 'flex flex-col gap-1.5';
+    actions.className = 'flex min-h-0 flex-1 flex-col gap-1.5';
+
+    const tabs = document.createElement('div');
+    tabs.className = 'hexahaven-trade-tabs';
+    const bankTabButton = document.createElement('button');
+    bankTabButton.type = 'button';
+    bankTabButton.className = 'hexahaven-trade-tab font-hexahaven-ui';
+    bankTabButton.textContent = 'Bank';
+    bankTabButton.addEventListener('click', () => this.setTradePanelTab('BANK'));
+    const playerTabButton = document.createElement('button');
+    playerTabButton.type = 'button';
+    playerTabButton.className = 'hexahaven-trade-tab font-hexahaven-ui';
+    playerTabButton.textContent = 'Player';
+    playerTabButton.addEventListener('click', () => this.setTradePanelTab('PLAYER'));
+    tabs.appendChild(bankTabButton);
+    tabs.appendChild(playerTabButton);
+
+    const tradeNotice = document.createElement('div');
+    tradeNotice.className = 'hexahaven-trade-notice font-hexahaven-ui';
+    tradeNotice.textContent = 'Select a trade mode.';
+
+    const tabContent = document.createElement('div');
+    tabContent.className = 'hexahaven-trade-tab-content';
+
+    const bankContent = document.createElement('div');
+    bankContent.className = 'hexahaven-trade-bank-content';
 
     const endTurnButton = document.createElement('button');
     endTurnButton.type = 'button';
@@ -1379,12 +2268,28 @@ export class GameBoardScreen {
       'font-hexahaven-ui rounded-md border border-amber-400/60 bg-amber-900/60 px-2 py-2 text-xs font-semibold';
     bankTradeButton.addEventListener('click', () => this.handleBankTradeClick());
 
-    actions.appendChild(bankGiveLabel);
-    actions.appendChild(bankGiveRow);
-    actions.appendChild(bankReceiveLabel);
-    actions.appendChild(bankReceiveRow);
-    actions.appendChild(bankTradeButton);
-    actions.appendChild(endTurnButton);
+    bankContent.appendChild(bankGiveLabel);
+    bankContent.appendChild(bankGiveRow);
+    bankContent.appendChild(bankReceiveLabel);
+    bankContent.appendChild(bankReceiveRow);
+    bankContent.appendChild(bankTradeButton);
+
+    const playerContent = document.createElement('div');
+    playerContent.className = 'hexahaven-trade-player-content';
+    const playerBody = document.createElement('div');
+    playerBody.className = 'hexahaven-trade-player-body';
+    playerContent.appendChild(playerBody);
+
+    const actionsFooter = document.createElement('div');
+    actionsFooter.className = 'hexahaven-trade-footer';
+    actionsFooter.appendChild(endTurnButton);
+
+    tabContent.appendChild(bankContent);
+    tabContent.appendChild(playerContent);
+    actions.appendChild(tabs);
+    actions.appendChild(tradeNotice);
+    actions.appendChild(tabContent);
+    actions.appendChild(actionsFooter);
 
     panel.appendChild(header);
     panel.appendChild(actions);
@@ -1398,15 +2303,25 @@ export class GameBoardScreen {
     this.rollDiceButton = rollDiceButton;
     this.endTurnButton = endTurnButton;
     this.bankTradeButton = bankTradeButton;
+    this.tradeTabsBankButton = bankTabButton;
+    this.tradeTabsPlayerButton = playerTabButton;
+    this.tradeBankContent = bankContent;
+    this.tradePlayerContent = playerContent;
+    this.tradePlayerBody = playerBody;
+    this.tradeNoticeEl = tradeNotice;
 
     parent.appendChild(panel);
     parent.appendChild(dicePanel);
 
+    this.syncTradePanelTabs();
     this.refreshBankTradeUi();
+    this.refreshPlayerTradeUi();
+    this.refreshIncomingTradeCardUi();
     this.updateTurnHud();
     this.updateTurnTimerUi();
     this.repositionYourTurnToast();
     this.repositionTutorialPrompt();
+    this.repositionIncomingTradeCard();
   }
 
   private mountChatPanel(parent: HTMLElement): void {
@@ -1471,7 +2386,10 @@ export class GameBoardScreen {
     this.refreshBottomBarThemeFromGameState();
     this.renderResourceBarFromGameState();
     this.renderBuildingBarFromGameState();
+    this.refreshPlayerTradeUi();
     this.renderChatMessages();
+    this.refreshIncomingTradeCardUi();
+    this.repositionIncomingTradeCard();
     this.updateMapDisplay();
   }
 
@@ -2749,9 +3667,11 @@ export class GameBoardScreen {
       this.bankTradeButton.style.opacity = this.bankTradeButton.disabled ? '0.55' : '1';
       this.bankTradeButton.style.cursor = this.bankTradeButton.disabled ? 'not-allowed' : 'pointer';
     }
+    this.refreshPlayerTradeUi();
     this.updateTurnTimerUi();
     this.repositionYourTurnToast();
     this.repositionTutorialPrompt();
+    this.repositionIncomingTradeCard();
   }
 
   private asDiceRoll(raw: unknown): DiceRoll | null {
@@ -3554,6 +4474,9 @@ export class GameBoardScreen {
     this.activeResourceFxTimers.forEach((timerId) => clearTimeout(timerId));
     this.activeResourceFxTimers = [];
     this.pendingResourceBarPops = [];
+    this.clearTradeNoticeTimers();
+    this.clearIncomingTradeCountdownTimer();
+    this.unbindPlayerTradeSocketEvents();
     this.clearBuildRejectToastTimers();
     this.clearYourTurnToastTimers();
     if (this.tutorialPromptCleanupTimer !== null) {
@@ -3627,6 +4550,18 @@ export class GameBoardScreen {
       this.playerPanel.remove();
       this.playerPanel = null;
     }
+    if (this.incomingTradeCard) {
+      this.incomingTradeCard.remove();
+      this.incomingTradeCard = null;
+    }
+    this.incomingTradeSenderTextEl = null;
+    this.incomingTradeOfferTextEl = null;
+    this.incomingTradeRequestTextEl = null;
+    this.incomingTradeProgressFillEl = null;
+    this.incomingTradeAcceptButton = null;
+    this.incomingTradeDenyButton = null;
+    this.incomingTradeRequest = null;
+    this.isRespondingToTradeRequest = false;
     if (this.resourceBar) {
       this.resourceBar.remove();
       this.resourceBar = null;
@@ -3650,11 +4585,23 @@ export class GameBoardScreen {
     this.rollDiceButton = null;
     this.endTurnButton = null;
     this.bankTradeButton = null;
+    this.tradeTabsBankButton = null;
+    this.tradeTabsPlayerButton = null;
+    this.tradeBankContent = null;
+    this.tradePlayerContent = null;
+    this.tradePlayerBody = null;
+    this.tradeNoticeEl = null;
+    this.tradePanelTab = 'BANK';
     this.buildButtons = {};
     this.bankGiveButtons = {};
     this.bankReceiveButtons = {};
     this.bankGiveSelection = 'EMBER';
     this.bankReceiveSelection = 'STONE';
+    this.playerTradeTargetPlayerId = null;
+    this.playerTradeOfferSelection = emptyResourceBundle();
+    this.playerTradeRequestSelection = emptyResourceBundle();
+    this.pendingOutgoingTradeIds.clear();
+    this.isSendingPlayerTradeRequest = false;
     this.buttonContainer = null;
     if (this.chatPanel) {
       this.chatPanel.remove();

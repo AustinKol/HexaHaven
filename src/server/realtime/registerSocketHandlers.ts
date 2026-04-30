@@ -1,6 +1,6 @@
 import type { Server, Socket } from 'socket.io';
 import { CLIENT_EVENTS, SERVER_EVENTS, SocketEvents } from '../../shared/constants/socketEvents';
-import type { GameState } from '../../shared/types/domain';
+import type { GameState, ResourceBundle } from '../../shared/types/domain';
 import type {
   AckError,
   BankTradeRequest,
@@ -12,7 +12,13 @@ import type {
   HydrateSessionRequest,
   JoinGameAckData,
   JoinGameRequest,
+  PlayerTradeRequest,
+  PlayerTradeRequestUpdateEvent,
+  RespondPlayerTradeRequestAckData,
+  RespondPlayerTradeRequestPayload,
   RollDiceRequest,
+  SendPlayerTradeRequestAckData,
+  SendPlayerTradeRequestPayload,
   SendChatMessageRequest,
   ServerToClientEvents,
   SimpleActionAckData,
@@ -26,6 +32,11 @@ type TypedServer = Server<ClientToServerEvents, ServerToClientEvents>;
 type TypedSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
 type SimpleActionAck = (response: SocketAck<SimpleActionAckData>) => void;
 type CreateOrJoinAck<T extends CreateGameAckData | JoinGameAckData> = (response: SocketAck<T>) => void;
+type SendTradeAck = (response: SocketAck<SendPlayerTradeRequestAckData>) => void;
+type RespondTradeAck = (response: SocketAck<RespondPlayerTradeRequestAckData>) => void;
+
+const PLAYER_TRADE_REQUEST_TTL_MS = 10_000;
+const RESOURCE_KEYS: Array<keyof ResourceBundle> = ['CRYSTAL', 'STONE', 'BLOOM', 'EMBER', 'GOLD'];
 
 interface SocketSession {
   gameId: string;
@@ -33,8 +44,78 @@ interface SocketSession {
   playerId: string;
 }
 
+interface PendingPlayerTradeRequest {
+  tradeRequest: PlayerTradeRequest;
+  timeoutId: ReturnType<typeof setTimeout>;
+}
+
 const socketPlayerMap = new Map<string, SocketSession>();
 const activeGameIds = new Set<string>();
+const pendingPlayerTradeRequests = new Map<string, PendingPlayerTradeRequest>();
+
+function buildPlayerRoomId(gameId: string, playerId: string): string {
+  return `${gameId}:player:${playerId}`;
+}
+
+function sanitizeResourceCount(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.trunc(value));
+}
+
+function normalizeResourceBundle(bundle: Partial<ResourceBundle> | null | undefined): ResourceBundle {
+  return {
+    CRYSTAL: sanitizeResourceCount(bundle?.CRYSTAL),
+    STONE: sanitizeResourceCount(bundle?.STONE),
+    BLOOM: sanitizeResourceCount(bundle?.BLOOM),
+    EMBER: sanitizeResourceCount(bundle?.EMBER),
+    GOLD: sanitizeResourceCount(bundle?.GOLD),
+  };
+}
+
+function resourceBundleSum(bundle: ResourceBundle): number {
+  return bundle.CRYSTAL + bundle.STONE + bundle.BLOOM + bundle.EMBER + bundle.GOLD;
+}
+
+function hasResources(inventory: ResourceBundle, required: ResourceBundle): boolean {
+  return RESOURCE_KEYS.every((resourceKey) => inventory[resourceKey] >= required[resourceKey]);
+}
+
+function cloneTradeRequestWithStatus(
+  tradeRequest: PlayerTradeRequest,
+  status: PlayerTradeRequest['status'],
+): PlayerTradeRequest {
+  return {
+    ...tradeRequest,
+    status,
+  };
+}
+
+function emitTradeUpdateToParticipants(
+  io: TypedServer,
+  tradeRequest: PlayerTradeRequest,
+  outcome: PlayerTradeRequestUpdateEvent['outcome'],
+  message: string,
+): void {
+  const payload: PlayerTradeRequestUpdateEvent = {
+    tradeRequest,
+    outcome,
+    message,
+  };
+  io.to(buildPlayerRoomId(tradeRequest.gameId, tradeRequest.senderPlayerId)).emit(
+    SERVER_EVENTS.PLAYER_TRADE_REQUEST_UPDATED,
+    payload,
+  );
+  io.to(buildPlayerRoomId(tradeRequest.gameId, tradeRequest.receiverPlayerId)).emit(
+    SERVER_EVENTS.PLAYER_TRADE_REQUEST_UPDATED,
+    payload,
+  );
+}
+
+function createTradeRequestId(): string {
+  return `trade_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function normalizeId(rawValue: unknown): string | null {
   if (typeof rawValue === 'string') {
@@ -117,8 +198,24 @@ function resolveErrorCode(message: string): AckError['code'] {
     return 'INVALID_PHASE';
   }
 
-  if (normalized.includes('need 4') || normalized.includes('insufficient')) {
+  if (
+    normalized.includes('need 4')
+    || normalized.includes('insufficient')
+    || normalized.includes('enough resources')
+  ) {
     return 'INSUFFICIENT_RESOURCES';
+  }
+
+  if (normalized.includes('trade') && normalized.includes('expired')) {
+    return 'TRADE_REQUEST_EXPIRED';
+  }
+
+  if (normalized.includes('trade') && normalized.includes('not found')) {
+    return 'TRADE_REQUEST_NOT_FOUND';
+  }
+
+  if (normalized.includes('trade') && normalized.includes('only allowed')) {
+    return 'TRADE_NOT_ALLOWED';
   }
 
   if (
@@ -144,6 +241,20 @@ function emitActionRejected(socket: TypedSocket, error: AckError): void {
 function rejectAction(
   socket: TypedSocket,
   ack: SimpleActionAck,
+  code: AckError['code'],
+  message: string,
+  details?: Record<string, unknown>,
+): void {
+  const error = buildAckError(code, message, details);
+  emitActionRejected(socket, error);
+  if (typeof ack === 'function') {
+    ack({ ok: false, error });
+  }
+}
+
+function rejectWithAck<T>(
+  socket: TypedSocket,
+  ack: (response: SocketAck<T>) => void,
   code: AckError['code'],
   message: string,
   details?: Record<string, unknown>,
@@ -208,6 +319,14 @@ function rememberSocketSession(
   const existingSession = socketPlayerMap.get(socket.id);
   if (existingSession && existingSession.gameId !== gameState.gameId) {
     socket.leave(existingSession.gameId);
+    socket.leave(buildPlayerRoomId(existingSession.gameId, existingSession.playerId));
+  }
+  if (
+    existingSession
+    && existingSession.gameId === gameState.gameId
+    && existingSession.playerId !== playerId
+  ) {
+    socket.leave(buildPlayerRoomId(existingSession.gameId, existingSession.playerId));
   }
 
   const session: SocketSession = {
@@ -217,6 +336,7 @@ function rememberSocketSession(
   };
 
   socket.join(gameState.gameId);
+  socket.join(buildPlayerRoomId(gameState.gameId, playerId));
   socketPlayerMap.set(socket.id, session);
   activeGameIds.add(gameState.gameId);
 
@@ -285,6 +405,11 @@ async function restoreSocketSessionFromHandshake(socket: TypedSocket): Promise<v
 }
 
 export function registerSocketHandlers(io: TypedServer): void {
+  pendingPlayerTradeRequests.forEach((pending) => {
+    clearTimeout(pending.timeoutId);
+  });
+  pendingPlayerTradeRequests.clear();
+
   let timeoutPollInFlight = false;
   setInterval(() => {
     if (timeoutPollInFlight || activeGameIds.size === 0) {
@@ -306,6 +431,30 @@ export function registerSocketHandlers(io: TypedServer): void {
       }
     })();
   }, 1000);
+
+  const clearPendingPlayerTradeRequest = (tradeRequestId: string): PendingPlayerTradeRequest | null => {
+    const pending = pendingPlayerTradeRequests.get(tradeRequestId) ?? null;
+    if (!pending) {
+      return null;
+    }
+    clearTimeout(pending.timeoutId);
+    pendingPlayerTradeRequests.delete(tradeRequestId);
+    return pending;
+  };
+
+  const expirePendingPlayerTradeRequest = (tradeRequestId: string): void => {
+    const pending = clearPendingPlayerTradeRequest(tradeRequestId);
+    if (!pending) {
+      return;
+    }
+    const expiredRequest = cloneTradeRequestWithStatus(pending.tradeRequest, 'expired');
+    emitTradeUpdateToParticipants(
+      io,
+      expiredRequest,
+      'expired',
+      'Trade request expired.',
+    );
+  };
 
   io.on(SocketEvents.Connection, (socket: TypedSocket) => {
     logger.info(`Client connected: ${socket.id}`);
@@ -610,6 +759,186 @@ export function registerSocketHandlers(io: TypedServer): void {
           logger.error('SEND_CHAT_MESSAGE failed:', error);
           const message = (error as Error).message;
           rejectAction(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
+
+    socket.on(
+      CLIENT_EVENTS.SEND_PLAYER_TRADE_REQUEST,
+      async (
+        request: SendPlayerTradeRequestPayload,
+        ack: SendTradeAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectWithAck(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
+
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectWithAck(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for SEND_PLAYER_TRADE_REQUEST.');
+          return;
+        }
+
+        try {
+          const gameState = await gamePersistenceService.getGameState(session.gameId);
+          if (!gameState) {
+            rejectWithAck(socket, ack, 'SESSION_NOT_FOUND', 'Game session not found.');
+            return;
+          }
+          if (gameState.roomStatus !== 'in_progress') {
+            rejectWithAck(socket, ack, 'TRADE_NOT_ALLOWED', 'Player trade is only allowed during an active game.');
+            return;
+          }
+          if (gameState.turn.currentPlayerId !== session.playerId || gameState.turn.phase !== 'ACTION') {
+            rejectWithAck(
+              socket,
+              ack,
+              'TRADE_NOT_ALLOWED',
+              'Player trade is only allowed during your ACTION phase.',
+            );
+            return;
+          }
+
+          const receiverPlayerId = normalizeId(request.receiverPlayerId);
+          if (!receiverPlayerId) {
+            rejectWithAck(socket, ack, 'INVALID_CONFIGURATION', 'Receiver player id is required.');
+            return;
+          }
+          if (receiverPlayerId === session.playerId) {
+            rejectWithAck(socket, ack, 'INVALID_CONFIGURATION', 'You cannot trade with yourself.');
+            return;
+          }
+
+          const sender = gameState.playersById[session.playerId];
+          const receiver = gameState.playersById[receiverPlayerId];
+          if (!sender || !receiver) {
+            rejectWithAck(socket, ack, 'SESSION_NOT_FOUND', 'Player not found.');
+            return;
+          }
+
+          const offeredResources = normalizeResourceBundle(request.offeredResources);
+          const requestedResources = normalizeResourceBundle(request.requestedResources);
+          if (resourceBundleSum(offeredResources) <= 0 || resourceBundleSum(requestedResources) <= 0) {
+            rejectWithAck(socket, ack, 'INVALID_CONFIGURATION', 'Trade offer and request cannot be empty.');
+            return;
+          }
+          if (!hasResources(sender.resources, offeredResources)) {
+            rejectWithAck(socket, ack, 'INSUFFICIENT_RESOURCES', 'You do not have enough resources for this offer.');
+            return;
+          }
+
+          const createdAtMs = Date.now();
+          const tradeRequest: PlayerTradeRequest = {
+            id: createTradeRequestId(),
+            gameId: session.gameId,
+            senderPlayerId: session.playerId,
+            receiverPlayerId,
+            offeredResources,
+            requestedResources,
+            status: 'pending',
+            createdAt: new Date(createdAtMs).toISOString(),
+            expiresAt: new Date(createdAtMs + PLAYER_TRADE_REQUEST_TTL_MS).toISOString(),
+          };
+          const timeoutId = setTimeout(() => {
+            expirePendingPlayerTradeRequest(tradeRequest.id);
+          }, PLAYER_TRADE_REQUEST_TTL_MS);
+
+          pendingPlayerTradeRequests.set(tradeRequest.id, { tradeRequest, timeoutId });
+          io.to(buildPlayerRoomId(session.gameId, receiverPlayerId)).emit(
+            SERVER_EVENTS.PLAYER_TRADE_REQUEST_RECEIVED,
+            tradeRequest,
+          );
+          emitTradeUpdateToParticipants(io, tradeRequest, 'pending', 'Trade request sent.');
+          ack({ ok: true, data: { tradeRequest } });
+        } catch (error) {
+          logger.error('SEND_PLAYER_TRADE_REQUEST failed:', error);
+          const message = (error as Error).message;
+          rejectWithAck(socket, ack, resolveErrorCode(message), message);
+        }
+      },
+    );
+
+    socket.on(
+      CLIENT_EVENTS.RESPOND_PLAYER_TRADE_REQUEST,
+      async (
+        request: RespondPlayerTradeRequestPayload,
+        ack: RespondTradeAck,
+      ) => {
+        const requestedIdentifier = normalizeId(request.gameId);
+        if (requestedIdentifier === null) {
+          rejectWithAck(socket, ack, 'INVALID_CONFIGURATION', 'Game id is required.');
+          return;
+        }
+
+        const session = await resolveSocketSession(socket, requestedIdentifier);
+        if (session === null) {
+          rejectWithAck(socket, ack, 'SESSION_NOT_FOUND', 'Player session not found for RESPOND_PLAYER_TRADE_REQUEST.');
+          return;
+        }
+
+        const tradeRequestId = normalizeId(request.tradeRequestId);
+        if (!tradeRequestId) {
+          rejectWithAck(socket, ack, 'INVALID_CONFIGURATION', 'Trade request id is required.');
+          return;
+        }
+
+        const pending = pendingPlayerTradeRequests.get(tradeRequestId);
+        if (!pending) {
+          rejectWithAck(socket, ack, 'TRADE_REQUEST_NOT_FOUND', 'Trade request not found.');
+          return;
+        }
+
+        const tradeRequest = pending.tradeRequest;
+        if (tradeRequest.gameId !== session.gameId) {
+          rejectWithAck(socket, ack, 'TRADE_REQUEST_NOT_FOUND', 'Trade request not found in this game.');
+          return;
+        }
+        if (tradeRequest.receiverPlayerId !== session.playerId) {
+          rejectWithAck(socket, ack, 'TRADE_NOT_ALLOWED', 'Only the receiver can respond to this trade.');
+          return;
+        }
+
+        if (request.response === 'declined') {
+          clearPendingPlayerTradeRequest(tradeRequest.id);
+          const declinedTradeRequest = cloneTradeRequestWithStatus(tradeRequest, 'declined');
+          emitTradeUpdateToParticipants(io, declinedTradeRequest, 'declined', 'Trade request declined.');
+          ack({ ok: true, data: { tradeRequest: declinedTradeRequest } });
+          return;
+        }
+
+        const expiresAtMs = Date.parse(tradeRequest.expiresAt);
+        if (Number.isFinite(expiresAtMs) && Date.now() > expiresAtMs) {
+          expirePendingPlayerTradeRequest(tradeRequest.id);
+          rejectWithAck(socket, ack, 'TRADE_REQUEST_EXPIRED', 'Trade request expired.');
+          return;
+        }
+
+        clearPendingPlayerTradeRequest(tradeRequest.id);
+        try {
+          const updatedGameState = await gamePersistenceService.executePlayerTrade(
+            tradeRequest.gameId,
+            tradeRequest.senderPlayerId,
+            tradeRequest.receiverPlayerId,
+            tradeRequest.offeredResources,
+            tradeRequest.requestedResources,
+          );
+          const acceptedTradeRequest = cloneTradeRequestWithStatus(tradeRequest, 'accepted');
+          emitTradeUpdateToParticipants(io, acceptedTradeRequest, 'accepted', 'Trade request accepted.');
+          io.to(updatedGameState.gameId).emit(SERVER_EVENTS.GAME_STATE_UPDATE, updatedGameState);
+          ack({ ok: true, data: { tradeRequest: acceptedTradeRequest } });
+        } catch (error) {
+          const message = (error as Error).message;
+          const failedTradeRequest = cloneTradeRequestWithStatus(tradeRequest, 'declined');
+          emitTradeUpdateToParticipants(
+            io,
+            failedTradeRequest,
+            'failed',
+            `Trade failed: ${message}`,
+          );
+          logger.error('RESPOND_PLAYER_TRADE_REQUEST failed:', error);
+          rejectWithAck(socket, ack, resolveErrorCode(message), message);
         }
       },
     );

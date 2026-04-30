@@ -48,7 +48,7 @@ const DEFAULT_STATS: PlayerStats = {
 };
 
 const RESOURCE_TYPES: ResourceType[] = ['CRYSTAL', 'STONE', 'BLOOM', 'EMBER', 'GOLD'];
-const FIXED_TURN_TIME_SEC = 30;
+const DEFAULT_TURN_TIME_SEC = 60;
 
 function nowISO(): string {
   return new Date().toISOString();
@@ -183,6 +183,13 @@ function normalizeChatMessages(messages: ChatMessage[]): ChatMessage[] {
 
 function isResourceType(value: string): value is ResourceType {
   return RESOURCE_TYPES.includes(value as ResourceType);
+}
+
+function resolveTurnDurationSec(config: GameConfig): number {
+  if (typeof config.turnTimeSec === 'number' && Number.isFinite(config.turnTimeSec)) {
+    return Math.max(10, Math.trunc(config.turnTimeSec));
+  }
+  return DEFAULT_TURN_TIME_SEC;
 }
 
 function normalizeDisplayNameForMatch(displayName: string): string {
@@ -386,19 +393,20 @@ function buildResourceCollection(gameState: GameState, sum: number): Map<string,
 }
 
 export class GamePersistenceService {
-  private computeTurnEndsAtIso(fromMs: number = Date.now()): string {
-    return new Date(fromMs + (FIXED_TURN_TIME_SEC * 1000)).toISOString();
+  private computeTurnEndsAtIso(turnDurationSec: number, fromMs: number = Date.now()): string {
+    return new Date(fromMs + (turnDurationSec * 1000)).toISOString();
   }
 
   private buildNextTurnState(gameState: GameState, nextPlayerIndex: number, startedAtIso: string): TurnState {
     const nextPlayerId = gameState.playerOrder[nextPlayerIndex];
+    const turnDurationSec = resolveTurnDurationSec(gameState.config);
     return {
       currentTurn: gameState.turn.currentTurn + 1,
       currentPlayerId: nextPlayerId,
       currentPlayerIndex: nextPlayerIndex,
       phase: 'ROLL',
       turnStartedAt: startedAtIso,
-      turnEndsAt: this.computeTurnEndsAtIso(new Date(startedAtIso).getTime()),
+      turnEndsAt: this.computeTurnEndsAtIso(turnDurationSec, new Date(startedAtIso).getTime()),
       lastDiceRoll: null,
     };
   }
@@ -538,13 +546,14 @@ export class GamePersistenceService {
     }
 
     const now = nowISO();
+    const turnDurationSec = resolveTurnDurationSec(gameState.config);
     const turn: TurnState = {
       currentTurn: 1,
       currentPlayerId: firstPlayerId,
       currentPlayerIndex: 0,
       phase: 'ROLL',
       turnStartedAt: now,
-      turnEndsAt: this.computeTurnEndsAtIso(),
+      turnEndsAt: this.computeTurnEndsAtIso(turnDurationSec),
       lastDiceRoll: null,
     };
 
@@ -848,6 +857,72 @@ export class GamePersistenceService {
 
     const updatedGameState = await this.loadRequiredGame(gameId);
     logger.info('Bank trade by ' + playerId + ' in game ' + gameId);
+    return updatedGameState;
+  }
+
+  async executePlayerTrade(
+    gameId: string,
+    senderPlayerId: string,
+    receiverPlayerId: string,
+    offeredResources: ResourceBundle,
+    requestedResources: ResourceBundle,
+  ): Promise<GameState> {
+    const gameState = await this.loadRequiredGame(gameId);
+    if (gameState.roomStatus !== 'in_progress') {
+      throw new Error('Player trade is only allowed during an active game');
+    }
+    if (senderPlayerId === receiverPlayerId) {
+      throw new Error('Players cannot trade with themselves');
+    }
+    if (gameState.turn.currentPlayerId !== senderPlayerId) {
+      throw new Error('Player trades are only allowed during the sender\'s turn');
+    }
+    if (gameState.turn.phase !== 'ACTION') {
+      throw new Error('Player trades are only allowed during the ACTION phase');
+    }
+
+    const sender = gameState.playersById[senderPlayerId];
+    const receiver = gameState.playersById[receiverPlayerId];
+    if (!sender || !receiver) {
+      throw new Error('Player not found');
+    }
+
+    const offer = sanitizeResourceBundle(offeredResources);
+    const request = sanitizeResourceBundle(requestedResources);
+    if (resourceBundleSum(offer) <= 0 || resourceBundleSum(request) <= 0) {
+      throw new Error('Trade offer and request cannot be empty');
+    }
+    if (!hasResources(sender.resources, offer)) {
+      throw new Error('Sender does not have enough resources for this trade');
+    }
+    if (!hasResources(receiver.resources, request)) {
+      throw new Error('Receiver does not have enough resources for this trade');
+    }
+
+    await playersRepository.applyPlayerTradeAtomic(
+      gameId,
+      senderPlayerId,
+      receiverPlayerId,
+      offer,
+      request,
+    );
+    await gameSessionsRepository.touchGame(gameId);
+    await turnsRepository.appendAction(gameId, 'turn_' + gameState.turn.currentTurn, {
+      actionId: generateId('trade'),
+      type: 'COLLECT_RESOURCES',
+      timestamp: Timestamp.now(),
+      result: {
+        playerTrade: {
+          senderPlayerId,
+          receiverPlayerId,
+          offeredResources: offer,
+          requestedResources: request,
+        },
+      },
+    });
+
+    const updatedGameState = await this.loadRequiredGame(gameId);
+    logger.info(`Player trade completed in game ${gameId}: ${senderPlayerId} <-> ${receiverPlayerId}`);
     return updatedGameState;
   }
 

@@ -10,6 +10,10 @@ import type {
   HydrateSessionRequest,
   JoinGameAckData,
   JoinGameRequest,
+  RespondPlayerTradeRequestAckData,
+  RespondPlayerTradeRequestPayload,
+  SendPlayerTradeRequestAckData,
+  SendPlayerTradeRequestPayload,
   SimpleActionAckData,
   SocketAck,
   SendChatMessageRequest,
@@ -218,4 +222,26 @@ export async function sendChatMessage(gameId: string, message: string): Promise<
   } catch (error) {
     console.error('Failed to send chat message:', error);
   }
+}
+
+export async function sendPlayerTradeRequest(
+  request: SendPlayerTradeRequestPayload,
+): Promise<SendPlayerTradeRequestAckData> {
+  const s = connectSocket(resolveSocketAuth(request.gameId));
+  const data = await emitWithAck<SendPlayerTradeRequestAckData>((ack) => {
+    s.emit(CLIENT_EVENTS.SEND_PLAYER_TRADE_REQUEST, request, ack);
+  });
+  setClientState({ lastActionRejected: null });
+  return data;
+}
+
+export async function respondPlayerTradeRequest(
+  request: RespondPlayerTradeRequestPayload,
+): Promise<RespondPlayerTradeRequestAckData> {
+  const s = connectSocket(resolveSocketAuth(request.gameId));
+  const data = await emitWithAck<RespondPlayerTradeRequestAckData>((ack) => {
+    s.emit(CLIENT_EVENTS.RESPOND_PLAYER_TRADE_REQUEST, request, ack);
+  });
+  setClientState({ lastActionRejected: null });
+  return data;
 }

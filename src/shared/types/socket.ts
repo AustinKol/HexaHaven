@@ -8,6 +8,7 @@
 import type {
   GameConfig,
   GameState,
+  ResourceBundle,
 } from './domain';
 import type { BuildStructureKind } from '../buildRules';
 
@@ -23,6 +24,9 @@ export interface AckError {
     | 'INVALID_PHASE'
     | 'MANDATORY_ACTION_INCOMPLETE'
     | 'INSUFFICIENT_RESOURCES'
+    | 'TRADE_REQUEST_NOT_FOUND'
+    | 'TRADE_REQUEST_EXPIRED'
+    | 'TRADE_NOT_ALLOWED'
     | 'INTERNAL_ERROR';
   message: string;
   details?: Record<string, unknown>;
@@ -78,6 +82,39 @@ export interface SendChatMessageRequest {
   message: string;
 }
 
+export interface SendPlayerTradeRequestPayload {
+  gameId: string;
+  receiverPlayerId: string;
+  offeredResources: ResourceBundle;
+  requestedResources: ResourceBundle;
+}
+
+export interface RespondPlayerTradeRequestPayload {
+  gameId: string;
+  tradeRequestId: string;
+  response: 'accepted' | 'declined';
+}
+
+export type PlayerTradeRequestStatus = 'pending' | 'accepted' | 'declined' | 'expired';
+
+export interface PlayerTradeRequest {
+  id: string;
+  gameId: string;
+  senderPlayerId: string;
+  receiverPlayerId: string;
+  offeredResources: ResourceBundle;
+  requestedResources: ResourceBundle;
+  status: PlayerTradeRequestStatus;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface PlayerTradeRequestUpdateEvent {
+  tradeRequest: PlayerTradeRequest;
+  outcome: 'pending' | 'accepted' | 'declined' | 'expired' | 'failed';
+  message: string;
+}
+
 // ─── Server -> Client ack data ───────────────────────────────────────
 
 export interface CreateGameAckData {
@@ -98,6 +135,14 @@ export interface SimpleActionAckData {
   gameState: GameState;
 }
 
+export interface SendPlayerTradeRequestAckData {
+  tradeRequest: PlayerTradeRequest;
+}
+
+export interface RespondPlayerTradeRequestAckData {
+  tradeRequest: PlayerTradeRequest;
+}
+
 export interface ActionRejectedEvent {
   code: AckError['code'];
   message: string;
@@ -109,6 +154,8 @@ export interface ActionRejectedEvent {
 export interface ServerToClientEvents {
   GAME_STATE_UPDATE: (gameState: GameState) => void;
   ACTION_REJECTED: (event: ActionRejectedEvent) => void;
+  PLAYER_TRADE_REQUEST_RECEIVED: (tradeRequest: PlayerTradeRequest) => void;
+  PLAYER_TRADE_REQUEST_UPDATED: (event: PlayerTradeRequestUpdateEvent) => void;
 }
 
 export interface ClientToServerEvents {
@@ -147,5 +194,13 @@ export interface ClientToServerEvents {
   SEND_CHAT_MESSAGE: (
     request: SendChatMessageRequest,
     ack: (response: SocketAck<SimpleActionAckData>) => void,
+  ) => void;
+  SEND_PLAYER_TRADE_REQUEST: (
+    request: SendPlayerTradeRequestPayload,
+    ack: (response: SocketAck<SendPlayerTradeRequestAckData>) => void,
+  ) => void;
+  RESPOND_PLAYER_TRADE_REQUEST: (
+    request: RespondPlayerTradeRequestPayload,
+    ack: (response: SocketAck<RespondPlayerTradeRequestAckData>) => void,
   ) => void;
 }

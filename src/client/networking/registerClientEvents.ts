@@ -29,4 +29,12 @@ export function registerClientEvents(socket: Socket<ServerToClientEvents, Client
   socket.on('ACTION_REJECTED', (event) => {
     setClientState({ lastActionRejected: event });
   });
+
+  socket.on('PLAYER_TRADE_REQUEST_RECEIVED', (tradeRequest) => {
+    console.log('[Client Socket] PLAYER_TRADE_REQUEST_RECEIVED', tradeRequest);
+  });
+
+  socket.on('PLAYER_TRADE_REQUEST_UPDATED', (event) => {
+    console.log('[Client Socket] PLAYER_TRADE_REQUEST_UPDATED', event);
+  });
 }

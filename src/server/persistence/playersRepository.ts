@@ -11,6 +11,88 @@ export interface ActiveGameEntry {
   lastAccessedAt: FirebaseFirestore.Timestamp;
 }
 
+const EMPTY_RESOURCES: ResourceBundle = {
+  CRYSTAL: 0,
+  STONE: 0,
+  BLOOM: 0,
+  EMBER: 0,
+  GOLD: 0,
+};
+
+function sanitizeResourceCount(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.trunc(value));
+}
+
+function normalizeResourceBundle(bundle: Partial<ResourceBundle> | null | undefined): ResourceBundle {
+  return {
+    CRYSTAL: sanitizeResourceCount(bundle?.CRYSTAL),
+    STONE: sanitizeResourceCount(bundle?.STONE),
+    BLOOM: sanitizeResourceCount(bundle?.BLOOM),
+    EMBER: sanitizeResourceCount(bundle?.EMBER),
+    GOLD: sanitizeResourceCount(bundle?.GOLD),
+  };
+}
+
+function resourceBundleSum(bundle: ResourceBundle): number {
+  return bundle.CRYSTAL + bundle.STONE + bundle.BLOOM + bundle.EMBER + bundle.GOLD;
+}
+
+function hasResources(inventory: ResourceBundle, cost: ResourceBundle): boolean {
+  return inventory.CRYSTAL >= cost.CRYSTAL
+    && inventory.STONE >= cost.STONE
+    && inventory.BLOOM >= cost.BLOOM
+    && inventory.EMBER >= cost.EMBER
+    && inventory.GOLD >= cost.GOLD;
+}
+
+function addResources(left: ResourceBundle, right: ResourceBundle): ResourceBundle {
+  return {
+    CRYSTAL: left.CRYSTAL + right.CRYSTAL,
+    STONE: left.STONE + right.STONE,
+    BLOOM: left.BLOOM + right.BLOOM,
+    EMBER: left.EMBER + right.EMBER,
+    GOLD: left.GOLD + right.GOLD,
+  };
+}
+
+function subtractResources(left: ResourceBundle, right: ResourceBundle): ResourceBundle {
+  return {
+    CRYSTAL: left.CRYSTAL - right.CRYSTAL,
+    STONE: left.STONE - right.STONE,
+    BLOOM: left.BLOOM - right.BLOOM,
+    EMBER: left.EMBER - right.EMBER,
+    GOLD: left.GOLD - right.GOLD,
+  };
+}
+
+function statValue(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 0;
+  }
+  return value;
+}
+
+function normalizeStats(stats: Partial<PlayerStats> | null | undefined): PlayerStats {
+  return {
+    publicVP: statValue(stats?.publicVP),
+    settlementsBuilt: statValue(stats?.settlementsBuilt),
+    citiesBuilt: statValue(stats?.citiesBuilt),
+    roadsBuilt: statValue(stats?.roadsBuilt),
+    totalResourcesCollected: statValue(stats?.totalResourcesCollected),
+    totalResourcesSpent: statValue(stats?.totalResourcesSpent),
+    longestRoadLength: statValue(stats?.longestRoadLength),
+    turnsPlayed: statValue(stats?.turnsPlayed),
+  };
+}
+
+export interface PlayerTradeTransferResult {
+  senderResources: ResourceBundle;
+  receiverResources: ResourceBundle;
+}
+
 function toIso(value: unknown): string {
   if (value && typeof value === 'object' && 'toDate' in value && typeof value.toDate === 'function') {
     return value.toDate().toISOString();
@@ -119,6 +201,88 @@ export class PlayersRepository extends FirestoreRepository {
       presence,
       updatedAt: FieldValue.serverTimestamp(),
     });
+  }
+
+  async applyPlayerTradeAtomic(
+    gameId: string,
+    senderPlayerId: string,
+    receiverPlayerId: string,
+    offeredResources: ResourceBundle,
+    requestedResources: ResourceBundle,
+  ): Promise<PlayerTradeTransferResult> {
+    if (senderPlayerId === receiverPlayerId) {
+      throw new Error('Players cannot trade with themselves');
+    }
+    const offer = normalizeResourceBundle(offeredResources);
+    const request = normalizeResourceBundle(requestedResources);
+    const senderRef = this.playersCol(gameId).doc(senderPlayerId);
+    const receiverRef = this.playersCol(gameId).doc(receiverPlayerId);
+    let result: PlayerTradeTransferResult = {
+      senderResources: { ...EMPTY_RESOURCES },
+      receiverResources: { ...EMPTY_RESOURCES },
+    };
+
+    await this.db.runTransaction(async (transaction) => {
+      const [senderSnap, receiverSnap] = await Promise.all([
+        transaction.get(senderRef),
+        transaction.get(receiverRef),
+      ]);
+      if (!senderSnap.exists || !receiverSnap.exists) {
+        throw new Error('Player not found');
+      }
+
+      const senderData = senderSnap.data() as PlayerState;
+      const receiverData = receiverSnap.data() as PlayerState;
+      const senderInventory = normalizeResourceBundle(senderData.resources);
+      const receiverInventory = normalizeResourceBundle(receiverData.resources);
+
+      if (!hasResources(senderInventory, offer)) {
+        throw new Error('Sender no longer has enough resources for this trade');
+      }
+      if (!hasResources(receiverInventory, request)) {
+        throw new Error('Receiver no longer has enough resources for this trade');
+      }
+
+      const senderNextResources = addResources(
+        subtractResources(senderInventory, offer),
+        request,
+      );
+      const receiverNextResources = addResources(
+        subtractResources(receiverInventory, request),
+        offer,
+      );
+
+      const senderStats = normalizeStats(senderData.stats);
+      const receiverStats = normalizeStats(receiverData.stats);
+      const senderNextStats: PlayerStats = {
+        ...senderStats,
+        totalResourcesSpent: senderStats.totalResourcesSpent + resourceBundleSum(offer),
+        totalResourcesCollected: senderStats.totalResourcesCollected + resourceBundleSum(request),
+      };
+      const receiverNextStats: PlayerStats = {
+        ...receiverStats,
+        totalResourcesSpent: receiverStats.totalResourcesSpent + resourceBundleSum(request),
+        totalResourcesCollected: receiverStats.totalResourcesCollected + resourceBundleSum(offer),
+      };
+
+      transaction.update(senderRef, {
+        resources: senderNextResources,
+        stats: senderNextStats,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      transaction.update(receiverRef, {
+        resources: receiverNextResources,
+        stats: receiverNextStats,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      result = {
+        senderResources: senderNextResources,
+        receiverResources: receiverNextResources,
+      };
+    });
+
+    return result;
   }
 
   // ─── User-level active games (design doc §4.2.11) ────────────────────────

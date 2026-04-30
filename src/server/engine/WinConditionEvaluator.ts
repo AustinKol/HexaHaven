@@ -1,7 +1,7 @@
 import type { GameState, PlayerState } from '../../shared/types/domain';
 
 // Demo 2 plan §Win Condition: first to 10 VP wins.
-export const DEFAULT_VP_TO_WIN = 10;
+export const DEFAULT_VP_TO_WIN = 5;
 
 export type WinEvaluation =
   | { winnerPlayerId: null }

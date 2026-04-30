@@ -187,7 +187,7 @@ test('rejoin hydrate restores full board state and attaches socket to live game 
   gamePersistenceService.getGameState = async () => currentState;
   gamePersistenceService.markPlayerConnected = async () => {};
   gamePersistenceService.markPlayerDisconnected = async () => {};
-  global.setInterval = (() => 0 as unknown as ReturnType<typeof setInterval>) as typeof setInterval;
+  global.setInterval = ((() => 0) as unknown) as typeof setInterval;
 
   try {
     registerSocketHandlers(io as unknown as Parameters<typeof registerSocketHandlers>[0]);
@@ -271,7 +271,7 @@ test('post-rejoin roll/chat updates are broadcast immediately to the shared live
   };
   gamePersistenceService.markPlayerConnected = async () => {};
   gamePersistenceService.markPlayerDisconnected = async () => {};
-  global.setInterval = (() => 0 as unknown as ReturnType<typeof setInterval>) as typeof setInterval;
+  global.setInterval = ((() => 0) as unknown) as typeof setInterval;
 
   try {
     registerSocketHandlers(io as unknown as Parameters<typeof registerSocketHandlers>[0]);
